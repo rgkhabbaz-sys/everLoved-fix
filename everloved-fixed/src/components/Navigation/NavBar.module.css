@@ -1,0 +1,105 @@
+.nav {
+    position: fixed;
+    top: 24px;
+    bottom: auto;
+    left: 50%;
+    transform: translateX(-50%) translateY(0);
+    width: auto;
+    height: auto;
+    z-index: 100;
+    background: rgba(255, 255, 255, 0.9);
+    /* Higher opacity for contrast */
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border: 1px solid rgba(255, 255, 255, 0.8);
+    border-radius: 999px;
+    padding: 8px 32px;
+    min-width: 800px;
+    /* Spread out more */
+    box-shadow:
+        0 20px 40px -10px rgba(0, 0, 0, 0.1),
+        0 0 0 1px rgba(0, 0, 0, 0.05);
+    /* Subtle rim */
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    animation: dock-entrance 0.8s cubic-bezier(0.2, 0.8, 0.2, 1) forwards;
+}
+
+@keyframes dock-entrance {
+    from {
+        transform: translateX(-50%) translateY(-100px);
+        opacity: 0;
+    }
+
+    to {
+        transform: translateX(-50%) translateY(0);
+        opacity: 1;
+    }
+}
+
+.container {
+    width: 100%;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.logo {
+    display: none;
+}
+
+.links {
+    display: flex;
+    gap: 12px;
+    width: 100%;
+    justify-content: space-between;
+}
+
+.link {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    color: var(--muted);
+    font-size: 0.85rem;
+    font-weight: 600;
+    /* Bolder text */
+    transition: all 0.3s cubic-bezier(0.2, 0.8, 0.2, 1);
+    padding: 8px 20px;
+    /* Larger touch target */
+    border-radius: 99px;
+    position: relative;
+    min-width: auto;
+}
+
+.link span {
+    display: none;
+}
+
+@media (min-width: 768px) {
+    .link span {
+        display: block;
+        font-size: 0.7rem;
+        letter-spacing: 0.02em;
+        text-transform: uppercase;
+    }
+}
+
+.link:hover {
+    color: var(--foreground);
+    background: rgba(0, 0, 0, 0.03);
+    transform: translateY(-2px);
+}
+
+.active {
+    color: var(--primary);
+    background: rgba(90, 112, 96, 0.08);
+    /* Subtle Sage tint */
+}
+
+.active::after {
+    display: none;
+}

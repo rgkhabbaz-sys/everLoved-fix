@@ -1,0 +1,366 @@
+.voiceSessionContainer {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    /* Align to right */
+    justify-content: center;
+    width: 100%;
+    height: 100%;
+    position: absolute;
+    top: 0;
+    left: 0;
+    z-index: 10;
+    padding-right: 80px;
+    pointer-events: none;
+    /* Crucial: Allow clicks to pass through to buttons behind */
+}
+
+/* Ripple Animation Container */
+.rippleContainer {
+    position: absolute;
+    top: 50%;
+    right: 120px;
+    /* Position relative to the right-aligned mic */
+    transform: translateY(-50%);
+    width: 240px;
+    height: 240px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+    z-index: -1;
+}
+
+.rippleListening,
+.rippleProcessing,
+.rippleSpeaking {
+    position: absolute;
+    border-radius: 50%;
+    opacity: 0;
+}
+
+.rippleListening {
+    width: 100%;
+    height: 100%;
+    border: 2px solid #4ade80;
+    /* Green */
+    animation: ripple-out 2.5s infinite cubic-bezier(0, 0.2, 0.8, 1);
+}
+
+.rippleProcessing {
+    width: 80%;
+    height: 80%;
+    border: 3px solid #3b82f6;
+    /* Blue */
+    animation: spin-pulse 2s infinite linear;
+}
+
+.rippleSpeaking {
+    width: 100%;
+    height: 100%;
+    background: rgba(255, 255, 255, 0.15);
+    animation: breathe-soft 4s infinite ease-in-out;
+}
+
+@keyframes ripple-out {
+    0% {
+        transform: scale(0.4);
+        opacity: 0.8;
+        border-width: 4px;
+    }
+
+    100% {
+        transform: scale(1.4);
+        opacity: 0;
+        border-width: 0px;
+    }
+}
+
+@keyframes spin-pulse {
+    0% {
+        transform: rotate(0deg) scale(1);
+        opacity: 0.8;
+    }
+
+    50% {
+        transform: rotate(180deg) scale(1.1);
+        opacity: 1;
+    }
+
+    100% {
+        transform: rotate(360deg) scale(1);
+        opacity: 0.8;
+    }
+}
+
+@keyframes breathe-soft {
+    0% {
+        transform: scale(0.9);
+        opacity: 0.2;
+    }
+
+    50% {
+        transform: scale(1.1);
+        opacity: 0.4;
+    }
+
+    100% {
+        transform: scale(0.9);
+        opacity: 0.2;
+    }
+}
+
+/* Status Text - High Legibility */
+.statusText {
+    margin-bottom: 2rem;
+    text-align: right;
+    /* Right align text */
+    min-height: 32px;
+    animation: fadeIn 0.5s ease-out;
+    margin-right: 20px;
+}
+
+.statusLabel {
+    font-family: 'Nunito', sans-serif;
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: #fff;
+    background: rgba(255, 255, 255, 0.1);
+    padding: 0.75rem 1.5rem;
+    border-radius: 30px;
+    backdrop-filter: blur(12px);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
+    letter-spacing: 0.02em;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+/* Transcript - Card Style */
+.transcriptContainer {
+    margin-bottom: 1.5rem;
+    max-width: 400px;
+    /* Limit width for sidebar feel */
+    text-align: right;
+    animation: slideLeft 0.6s cubic-bezier(0.2, 0.8, 0.2, 1);
+    margin-right: 20px;
+}
+
+@keyframes slideLeft {
+    from {
+        opacity: 0;
+        transform: translateX(20px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateX(0);
+    }
+}
+
+.transcriptText {
+    font-family: 'Merriweather', serif;
+    font-size: 1.35rem;
+    /* Larger, readable font */
+    line-height: 1.5;
+    color: #fff;
+    background: rgba(20, 20, 25, 0.8);
+    /* Dark Glass */
+    padding: 1.5rem 2rem;
+    border-radius: 24px;
+    box-shadow:
+        0 10px 40px -10px rgba(0, 0, 0, 0.4),
+        0 0 0 1px rgba(255, 255, 255, 0.1) inset;
+    display: inline-block;
+    backdrop-filter: blur(16px);
+    text-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+}
+
+/* Buttons */
+.startButton {
+    position: absolute;
+    bottom: 150px;
+    /* Moved up by ~1 inch to clear bottom buttons */
+    right: 40px;
+    /* moved from margin-right to absolute right */
+    padding: 0;
+    width: 80px;
+    height: 80px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    border-radius: 50%;
+    cursor: pointer;
+    background: #fff;
+    color: #000;
+    pointer-events: auto;
+    /* Enable clicks on the button itself */
+    box-shadow:
+        0 10px 30px rgba(255, 255, 255, 0.2),
+        0 0 0 1px rgba(255, 255, 255, 0.5) inset;
+    transition: all 0.3s cubic-bezier(0.2, 0.8, 0.2, 1);
+    z-index: 50;
+}
+
+.startButton:hover {
+    transform: translateY(-4px) scale(1.02);
+    box-shadow:
+        0 20px 40px rgba(255, 255, 255, 0.3),
+        0 0 0 1px rgba(255, 255, 255, 0.8) inset;
+    background: #ffffff;
+}
+
+.endButton {
+    background: rgba(255, 255, 255, 0.1);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    color: rgba(255, 255, 255, 0.8);
+    padding: 0.75rem 2rem;
+    border-radius: 99px;
+    font-size: 0.9rem;
+    font-weight: 700;
+    cursor: pointer;
+    pointer-events: auto;
+    /* Enable clicks */
+    transition: all 0.3s ease;
+    backdrop-filter: blur(10px);
+    margin-top: 1.5rem;
+    box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
+    margin-right: 20px;
+}
+
+.endButton:hover {
+    background: rgba(255, 255, 255, 0.2);
+    color: #fff;
+    transform: translateY(-2px);
+    box-shadow: 0 8px 25px rgba(0, 0, 0, 0.3);
+    border-color: rgba(255, 255, 255, 0.4);
+}
+
+/* Error State */
+.errorContainer {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    /* Right align */
+    gap: 1rem;
+    animation: fadeIn 0.4s ease-out;
+    margin-right: 20px;
+}
+
+.errorMessage {
+    color: #fca5a5;
+    font-weight: 600;
+    font-size: 0.95rem;
+    background: rgba(239, 68, 68, 0.1);
+    padding: 1rem 1.5rem;
+    border-radius: 16px;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
+    text-align: right;
+    border: 1px solid rgba(239, 68, 68, 0.2);
+    backdrop-filter: blur(10px);
+}
+
+.retryButton {
+    background: rgba(255, 255, 255, 0.1);
+    color: #fff;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    padding: 0.75rem 1.5rem;
+    border-radius: 12px;
+    cursor: pointer;
+    font-weight: 700;
+    font-size: 0.9rem;
+    transition: all 0.2s ease;
+}
+
+.retryButton:hover {
+    transform: scale(1.05);
+    background: rgba(255, 255, 255, 0.2);
+}
+
+/* Input Fallback */
+.inputContainer {
+    width: 100%;
+    max-width: 340px;
+    margin-bottom: 1rem;
+    margin-right: 20px;
+}
+
+.textInput {
+    width: 100%;
+    background: rgba(0, 0, 0, 0.4);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    color: #fff;
+    padding: 1rem 1.5rem;
+    border-radius: 24px;
+    font-size: 1rem;
+    backdrop-filter: blur(12px);
+    outline: none;
+    transition: all 0.3s ease;
+    text-align: right;
+    /* Right align text input */
+    font-family: 'Nunito', sans-serif;
+    font-weight: 600;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
+}
+
+.textInput:focus {
+    background: rgba(0, 0, 0, 0.6);
+    border-color: rgba(255, 255, 255, 0.4);
+    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.3);
+    transform: translateY(-2px);
+}
+
+.textInput::placeholder {
+    color: rgba(255, 255, 255, 0.4);
+    font-weight: 500;
+}
+
+/* Therapy Modes - Glass Pill Design */
+.modesContainer {
+    display: flex;
+    flex-direction: column;
+    /* Stack vertically - Force Update */
+    gap: 12px;
+    /* Increased gap for vertical spacing */
+    background: rgba(0, 0, 0, 0.3);
+    padding: 12px;
+    /* Increased padding */
+    border-radius: 24px;
+    /* Adjusted radius for vertical pill/card shape */
+    backdrop-filter: blur(12px);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
+    margin-top: 1rem;
+    margin-bottom: 2rem;
+    pointer-events: auto;
+    /* Ensure clickable */
+}
+
+.modeButton {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 20px;
+    border-radius: 99px;
+    border: none;
+    background: transparent;
+    color: rgba(255, 255, 255, 0.6);
+    font-family: 'Nunito', sans-serif;
+    font-weight: 700;
+    font-size: 0.9rem;
+    cursor: pointer;
+    transition: all 0.3s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.modeButton:hover {
+    color: #fff;
+    background: rgba(255, 255, 255, 0.1);
+}
+
+.activeMode {
+    background: #fff !important;
+    color: #000 !important;
+    box-shadow:
+        0 4px 12px rgba(0, 0, 0, 0.2),
+        0 0 0 1px rgba(255, 255, 255, 0.5) inset;
+    transform: scale(1.05);
+}
