@@ -62,7 +62,21 @@ declare global {
     }
 }
 
+// ============================================
+// CONTINUOUS VOICE SESSION - "PHONE CALL" MODE
+// ============================================
+// State Machine:
+// IDLE -> (start) -> LISTENING
+// LISTENING -> (user speaks) -> PROCESSING  
+// PROCESSING -> (AI responds) -> SPEAKING
+// SPEAKING -> (audio ends) -> LISTENING (auto-restart!)
+// ANY STATE -> (end button) -> IDLE (kill switch)
+// ============================================
+
 const VoiceSession: React.FC<VoiceSessionProps> = ({ onEndSession, onSpeakingStateChange, activeProfile }) => {
+    // ===== GLOBAL KILL SWITCH =====
+    const isConversationActiveRef = useRef(false);
+    
     // Session State
     const [isSessionActive, setIsSessionActive] = useState(false);
 
@@ -70,20 +84,90 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({ onEndSession, onSpeakingSta
     const [status, setStatus] = useState<'idle' | 'listening' | 'processing' | 'speaking'>('idle');
     const [isUserSpeaking, setIsUserSpeaking] = useState(false);
     const [transcript, setTranscript] = useState('');
+    const [interimTranscript, setInterimTranscript] = useState('');
     const [aiResponse, setAiResponse] = useState('');
     const [debugLogs, setDebugLogs] = useState<string[]>([]);
     const [error, setError] = useState<string | null>(null);
     const [isThinking, setIsThinking] = useState(false);
     
+    // Refs
     const audioRef = useRef<HTMLAudioElement | null>(null);
     const recognitionRef = useRef<SpeechRecognition | null>(null);
-    const isSessionActiveRef = useRef(false);
+    const statusRef = useRef<'idle' | 'listening' | 'processing' | 'speaking'>('idle');
+    
+    // Debounce timer for handling pauses in speech
+    const silenceTimerRef = useRef<NodeJS.Timeout | null>(null);
+    const lastSpeechTimeRef = useRef<number>(Date.now());
+    
+    // Configuration
+    const SILENCE_THRESHOLD_MS = 1500; // Wait 1.5 seconds of silence before processing
+    const RESTART_DELAY_MS = 100; // Quick restart after speaking ends
+
+    // Keep statusRef in sync
+    useEffect(() => {
+        statusRef.current = status;
+    }, [status]);
 
     const addLog = (msg: string) => {
         setDebugLogs(prev => [...prev.slice(-4), `${new Date().toLocaleTimeString()}: ${msg}`]);
     };
 
-    // Initialize Speech Recognition
+    // ===== IMMEDIATE LISTENING RESTART =====
+    const startListening = useCallback(() => {
+        // Check kill switch first
+        if (!isConversationActiveRef.current) {
+            addLog('Kill switch active - not restarting');
+            return;
+        }
+        
+        if (!recognitionRef.current) {
+            addLog('No recognition available');
+            return;
+        }
+
+        // Don't start if already processing or speaking
+        if (statusRef.current === 'processing' || statusRef.current === 'speaking') {
+            addLog(`Skipping start - status is ${statusRef.current}`);
+            return;
+        }
+
+        try {
+            recognitionRef.current.start();
+            setStatus('listening');
+            addLog('🎤 Listening...');
+        } catch (e: any) {
+            // Already started - that's fine
+            if (e.message?.includes('already started')) {
+                setStatus('listening');
+            } else {
+                console.error('Start listening error:', e);
+                // Try again shortly
+                setTimeout(() => {
+                    if (isConversationActiveRef.current) {
+                        startListening();
+                    }
+                }, 500);
+            }
+        }
+    }, []);
+
+    // ===== STOP LISTENING =====
+    const stopListening = useCallback(() => {
+        if (recognitionRef.current) {
+            try {
+                recognitionRef.current.stop();
+            } catch (e) {
+                // Ignore
+            }
+        }
+        // Clear any pending silence timer
+        if (silenceTimerRef.current) {
+            clearTimeout(silenceTimerRef.current);
+            silenceTimerRef.current = null;
+        }
+    }, []);
+
+    // ===== INITIALIZE SPEECH RECOGNITION =====
     useEffect(() => {
         const SpeechRecognitionAPI = window.SpeechRecognition || window.webkitSpeechRecognition;
         
@@ -97,29 +181,69 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({ onEndSession, onSpeakingSta
         recognition.interimResults = true;
         recognition.lang = 'en-US';
 
+        let accumulatedTranscript = '';
+
         recognition.onstart = () => {
-            addLog('Listening started');
+            addLog('Recognition started');
             setError(null);
+            accumulatedTranscript = '';
         };
 
         recognition.onspeechstart = () => {
             setIsUserSpeaking(true);
-            addLog('Speech detected');
+            lastSpeechTimeRef.current = Date.now();
+            
+            // Clear any pending silence timer - user is speaking again
+            if (silenceTimerRef.current) {
+                clearTimeout(silenceTimerRef.current);
+                silenceTimerRef.current = null;
+            }
         };
 
         recognition.onspeechend = () => {
             setIsUserSpeaking(false);
-            addLog('Speech ended');
+            lastSpeechTimeRef.current = Date.now();
         };
 
         recognition.onresult = (event: SpeechRecognitionEvent) => {
-            const lastResult = event.results[event.results.length - 1];
-            const text = lastResult[0].transcript;
-            setTranscript(text);
+            // Check kill switch
+            if (!isConversationActiveRef.current) return;
+            
+            let interim = '';
+            let final = '';
 
-            if (lastResult.isFinal && text.trim()) {
-                addLog(`Final: "${text.trim()}"`);
-                handleUserSpeech(text.trim());
+            for (let i = 0; i < event.results.length; i++) {
+                const result = event.results[i];
+                if (result.isFinal) {
+                    final += result[0].transcript;
+                } else {
+                    interim += result[0].transcript;
+                }
+            }
+
+            // Update UI with what user is saying
+            setInterimTranscript(interim);
+            
+            if (final) {
+                accumulatedTranscript += ' ' + final;
+                setTranscript(accumulatedTranscript.trim());
+                lastSpeechTimeRef.current = Date.now();
+                
+                // Reset silence timer - wait for more speech or silence
+                if (silenceTimerRef.current) {
+                    clearTimeout(silenceTimerRef.current);
+                }
+                
+                // Start silence timer - if no more speech for SILENCE_THRESHOLD_MS, process
+                silenceTimerRef.current = setTimeout(() => {
+                    if (isConversationActiveRef.current && 
+                        statusRef.current === 'listening' && 
+                        accumulatedTranscript.trim()) {
+                        addLog(`Processing after ${SILENCE_THRESHOLD_MS}ms silence`);
+                        handleUserSpeech(accumulatedTranscript.trim());
+                        accumulatedTranscript = '';
+                    }
+                }, SILENCE_THRESHOLD_MS);
             }
         };
 
@@ -128,60 +252,58 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({ onEndSession, onSpeakingSta
             
             if (event.error === 'not-allowed') {
                 setError('Microphone access denied. Please allow microphone access and try again.');
+                isConversationActiveRef.current = false;
+                setIsSessionActive(false);
+                setStatus('idle');
             } else if (event.error === 'no-speech') {
-                // Restart listening if session is active
-                if (isSessionActiveRef.current && status !== 'processing' && status !== 'speaking') {
-                    setTimeout(() => {
-                        try {
-                            recognition.start();
-                        } catch (e) {
-                            // Ignore if already started
-                        }
-                    }, 100);
+                // No speech detected - just restart if active
+                if (isConversationActiveRef.current && statusRef.current === 'listening') {
+                    setTimeout(startListening, RESTART_DELAY_MS);
                 }
-            } else if (event.error !== 'aborted') {
-                console.error('Speech recognition error:', event.error);
+            } else if (event.error === 'aborted') {
+                // Intentionally stopped - check if we should restart
+                if (isConversationActiveRef.current && 
+                    statusRef.current !== 'processing' && 
+                    statusRef.current !== 'speaking') {
+                    setTimeout(startListening, RESTART_DELAY_MS);
+                }
             }
         };
 
         recognition.onend = () => {
             addLog('Recognition ended');
-            // Auto-restart if session is still active and not processing/speaking
-            if (isSessionActiveRef.current && status !== 'processing' && status !== 'speaking') {
-                setTimeout(() => {
-                    try {
-                        recognition.start();
-                        addLog('Auto-restarted listening');
-                    } catch (e) {
-                        // Ignore if already started
-                    }
-                }, 100);
+            
+            // THE FOREVER LOOP: Auto-restart if conversation is active
+            // Only restart if not processing/speaking (those states restart after completion)
+            if (isConversationActiveRef.current && 
+                statusRef.current !== 'processing' && 
+                statusRef.current !== 'speaking') {
+                addLog('Auto-restarting listener...');
+                setTimeout(startListening, RESTART_DELAY_MS);
             }
         };
 
         recognitionRef.current = recognition;
 
         return () => {
+            isConversationActiveRef.current = false;
+            if (silenceTimerRef.current) {
+                clearTimeout(silenceTimerRef.current);
+            }
             recognition.abort();
         };
-    }, []);
+    }, [startListening]);
 
-    // Handle user speech - send to AI
+    // ===== HANDLE USER SPEECH - SEND TO AI =====
     const handleUserSpeech = async (text: string) => {
-        if (!text.trim() || !isSessionActiveRef.current) return;
+        if (!text.trim() || !isConversationActiveRef.current) return;
 
-        // Stop listening while processing
-        if (recognitionRef.current) {
-            try {
-                recognitionRef.current.stop();
-            } catch (e) {
-                // Ignore
-            }
-        }
-
+        // Transition: LISTENING -> PROCESSING
+        stopListening();
         setStatus('processing');
         setIsThinking(true);
-        addLog('Sending to AI...');
+        setInterimTranscript('');
+        addLog('🤔 Processing...');
 
         try {
             const response = await fetch('/api/chat', {
@@ -204,7 +326,7 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({ onEndSession, onSpeakingSta
             setIsThinking(false);
             addLog(`AI: "${aiText.substring(0, 30)}..."`);
 
-            // Speak the response
+            // Transition: PROCESSING -> SPEAKING
             await speakResponse(aiText);
 
         } catch (err: any) {
@@ -219,12 +341,17 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({ onEndSession, onSpeakingSta
         }
     };
 
-    // Speak the AI response
+    // ===== SPEAK AI RESPONSE =====
     const speakResponse = async (text: string) => {
-        if (!isSessionActiveRef.current) return;
+        if (!isConversationActiveRef.current) {
+            // Conversation ended while processing - go back to listening anyway in case
+            return;
+        }
 
+        // Transition: PROCESSING -> SPEAKING
         setStatus('speaking');
         if (onSpeakingStateChange) onSpeakingStateChange(true);
+        addLog('🔊 Speaking...');
 
         // Determine gender from profile
         const gender = activeProfile?.gender || 'female';
@@ -245,27 +372,24 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({ onEndSession, onSpeakingSta
             const audio = new Audio(audioUrl);
             audioRef.current = audio;
 
+            // ===== CRITICAL: SPEAKING -> LISTENING TRANSITION =====
             audio.onended = () => {
                 URL.revokeObjectURL(audioUrl);
-                if (isSessionActiveRef.current) {
+                addLog('Audio finished');
+                
+                if (onSpeakingStateChange) onSpeakingStateChange(false);
+                
+                // THE FOREVER LOOP: Immediately restart listening
+                if (isConversationActiveRef.current) {
                     setStatus('listening');
-                    if (onSpeakingStateChange) onSpeakingStateChange(false);
-                    // Resume listening
-                    setTimeout(() => {
-                        if (recognitionRef.current && isSessionActiveRef.current) {
-                            try {
-                                recognitionRef.current.start();
-                                addLog('Resumed listening');
-                            } catch (e) {
-                                // Ignore
-                            }
-                        }
-                    }, 200);
+                    setTranscript(''); // Clear old transcript for new input
+                    setTimeout(startListening, RESTART_DELAY_MS);
                 }
             };
 
             audio.onerror = () => {
                 console.warn('Audio playback failed, using fallback TTS');
+                URL.revokeObjectURL(audioUrl);
                 playFallbackTTS(text);
             };
 
@@ -277,9 +401,9 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({ onEndSession, onSpeakingSta
         }
     };
 
-    // Fallback to browser TTS
+    // ===== FALLBACK BROWSER TTS =====
     const playFallbackTTS = (text: string) => {
-        if (!isSessionActiveRef.current) return;
+        if (!isConversationActiveRef.current) return;
 
         window.speechSynthesis.cancel();
 
@@ -302,88 +426,90 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({ onEndSession, onSpeakingSta
             if (onSpeakingStateChange) onSpeakingStateChange(true);
         };
 
+        // ===== CRITICAL: SPEAKING -> LISTENING TRANSITION =====
         utterance.onend = () => {
-            if (isSessionActiveRef.current) {
+            addLog('Fallback TTS finished');
+            if (onSpeakingStateChange) onSpeakingStateChange(false);
+            
+            // THE FOREVER LOOP: Immediately restart listening
+            if (isConversationActiveRef.current) {
                 setStatus('listening');
-                if (onSpeakingStateChange) onSpeakingStateChange(false);
-                // Resume listening
-                setTimeout(() => {
-                    if (recognitionRef.current && isSessionActiveRef.current) {
-                        try {
-                            recognitionRef.current.start();
-                        } catch (e) {
-                            // Ignore
-                        }
-                    }
-                }, 200);
+                setTranscript(''); // Clear old transcript for new input
+                setTimeout(startListening, RESTART_DELAY_MS);
             }
         };
 
         utterance.onerror = () => {
-            setStatus('listening');
             if (onSpeakingStateChange) onSpeakingStateChange(false);
-            if (recognitionRef.current && isSessionActiveRef.current) {
-                try {
-                    recognitionRef.current.start();
-                } catch (e) {
-                    // Ignore
-                }
+            // Still try to restart listening
+            if (isConversationActiveRef.current) {
+                setStatus('listening');
+                setTimeout(startListening, RESTART_DELAY_MS);
             }
         };
 
         window.speechSynthesis.speak(utterance);
     };
 
-    // Barge-in: Stop AI speech when user starts talking
+    // ===== BARGE-IN: INTERRUPT AI WHEN USER SPEAKS =====
     useEffect(() => {
         if (isUserSpeaking && status === 'speaking') {
-            addLog('Barge-in detected');
-            // Stop audio playback
+            addLog('⚡ Barge-in! Stopping AI...');
+            
+            // Stop ElevenLabs audio
             if (audioRef.current) {
                 audioRef.current.pause();
                 audioRef.current.currentTime = 0;
+                audioRef.current = null;
             }
+            
             // Stop browser TTS
             window.speechSynthesis.cancel();
             
+            // Transition immediately to listening
             setStatus('listening');
             if (onSpeakingStateChange) onSpeakingStateChange(false);
+            
+            // Recognition should already be running from the barge-in detection
         }
     }, [isUserSpeaking, status, onSpeakingStateChange]);
 
-    // Start session
+    // ===== START SESSION =====
     const handleStartSession = useCallback(async () => {
+        // Activate the conversation
+        isConversationActiveRef.current = true;
         setIsSessionActive(true);
-        isSessionActiveRef.current = true;
         setStatus('listening');
         setError(null);
         setTranscript('');
+        setInterimTranscript('');
         setAiResponse('');
 
-        if (recognitionRef.current) {
-            try {
-                recognitionRef.current.start();
-                addLog('Session started');
-            } catch (e: any) {
-                console.error('Recognition start error:', e);
-                setError('Failed to start microphone. Please check permissions.');
-                setIsSessionActive(false);
-                isSessionActiveRef.current = false;
-                setStatus('idle');
-            }
-        }
-    }, []);
+        addLog('🚀 Session started - continuous mode');
+        
+        // Start the forever loop
+        startListening();
+    }, [startListening]);
 
-    // End session
+    // ===== END SESSION (KILL SWITCH) =====
     const handleEndSession = useCallback(() => {
+        addLog('🛑 Kill switch activated');
+        
+        // KILL SWITCH: Stop everything
+        isConversationActiveRef.current = false;
         setIsSessionActive(false);
-        isSessionActiveRef.current = false;
         setStatus('idle');
+
+        // Clear silence timer
+        if (silenceTimerRef.current) {
+            clearTimeout(silenceTimerRef.current);
+            silenceTimerRef.current = null;
+        }
 
         // Stop recognition
         if (recognitionRef.current) {
             try {
-                recognitionRef.current.stop();
+                recognitionRef.current.abort();
             } catch (e) {
                 // Ignore
             }
@@ -398,7 +524,6 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({ onEndSession, onSpeakingSta
         // Stop browser TTS
         window.speechSynthesis.cancel();
 
-        addLog('Session ended');
         onEndSession();
     }, [onEndSession]);
 
@@ -499,8 +624,16 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({ onEndSession, onSpeakingSta
                     {/* Transcript Feedback */}
                     {!error && (
                         <div className={styles.transcriptContainer}>
-                            {transcript && <p className={styles.transcriptText}>You: "{transcript}"</p>}
-                            {aiResponse && <p className={styles.transcriptText} style={{ color: '#60a5fa', marginTop: '0.5rem' }}>AI: "{aiResponse}"</p>}
+                            {(transcript || interimTranscript) && (
+                                <p className={styles.transcriptText}>
+                                    You: "{transcript}{interimTranscript && <span style={{ opacity: 0.5 }}>{interimTranscript}</span>}"
+                                </p>
+                            )}
+                            {aiResponse && (
+                                <p className={styles.transcriptText} style={{ color: '#60a5fa', marginTop: '0.5rem' }}>
+                                    AI: "{aiResponse}"
+                                </p>
+                            )}
                         </div>
                     )}
 
