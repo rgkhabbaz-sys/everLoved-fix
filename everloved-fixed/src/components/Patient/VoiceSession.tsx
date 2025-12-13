@@ -6,110 +6,6 @@ import styles from './Patient.module.css';
 import { Mic, AlertCircle } from 'lucide-react';
 
 // ============================================
-// AUDIO QUEUE CLASS - STRICT FIFO, NO LOOPS
-// ============================================
-class AudioQueue {
-    private queue: Blob[] = [];
-    private isPlaying: boolean = false;
-    private currentAudio: HTMLAudioElement | null = null;
-    private onPlaybackStart: () => void;
-    private onPlaybackEnd: () => void;
-    private isFadingOut: boolean = false;
-
-    constructor(onStart: () => void, onEnd: () => void) {
-        this.onPlaybackStart = onStart;
-        this.onPlaybackEnd = onEnd;
-    }
-
-    // Push audio to queue and start playing if idle
-    push(audioBlob: Blob): void {
-        this.queue.push(audioBlob);
-        if (!this.isPlaying) {
-            this.playNext();
-        }
-    }
-
-    // Play next item in queue - ONE WAY, NO LOOPS
-    private async playNext(): Promise<void> {
-        if (this.queue.length === 0) {
-            this.isPlaying = false;
-            this.currentAudio = null;
-            this.onPlaybackEnd();
-            return;
-        }
-
-        this.isPlaying = true;
-        this.onPlaybackStart();
-
-        // POP and DESTROY - this chunk can never be played twice
-        const audioBlob = this.queue.shift()!;
-        const audioUrl = URL.createObjectURL(audioBlob);
-        const audio = new Audio(audioUrl);
-        this.currentAudio = audio;
-
-        audio.onended = () => {
-            // Clean up THIS chunk completely
-            URL.revokeObjectURL(audioUrl);
-            this.currentAudio = null;
-            // Immediately check for next - no delay
-            this.playNext();
-        };
-
-        audio.onerror = () => {
-            URL.revokeObjectURL(audioUrl);
-            this.currentAudio = null;
-            this.playNext();
-        };
-
-        try {
-            await audio.play();
-        } catch (e) {
-            console.error('Audio play error:', e);
-            URL.revokeObjectURL(audioUrl);
-            this.currentAudio = null;
-            this.playNext();
-        }
-    }
-
-    // SMART BARGE-IN: Fade out over 200ms, then stop
-    async fadeOutAndClear(): Promise<void> {
-        if (!this.currentAudio || this.isFadingOut) return;
-        
-        this.isFadingOut = true;
-        const audio = this.currentAudio;
-        const startVolume = audio.volume;
-        const fadeSteps = 10;
-        const fadeInterval = 20; // 200ms total
-
-        for (let i = fadeSteps; i >= 0; i--) {
-            if (!this.currentAudio) break;
-            audio.volume = (i / fadeSteps) * startVolume;
-            await new Promise(r => setTimeout(r, fadeInterval));
-        }
-
-        this.stop();
-        this.isFadingOut = false;
-    }
-
-    // Hard stop - clear everything
-    stop(): void {
-        if (this.currentAudio) {
-            this.currentAudio.pause();
-            this.currentAudio.src = '';
-            this.currentAudio = null;
-        }
-        // Clear the entire queue - no leftovers
-        this.queue = [];
-        this.isPlaying = false;
-        this.onPlaybackEnd();
-    }
-
-    get playing(): boolean {
-        return this.isPlaying;
-    }
-}
-
-// ============================================
 // TYPE DEFINITIONS
 // ============================================
 interface VoiceSessionProps {
@@ -160,8 +56,18 @@ declare global {
 }
 
 // ============================================
-// EVERLOVED VOICE SESSION v3.0
-// LINEAR AUDIO QUEUE + SMART INTERRUPT
+// EVERLOVED VOICE SESSION v4.0
+// STABILITY FIRST - NO SELF-INTERRUPTION
+// ============================================
+// 
+// Key principle: Recognition is COMPLETELY OFF while AI speaks.
+// No barge-in. No echo detection issues. Rock solid.
+//
+// Flow:
+// 1. LISTENING: Recognition ON, waiting for user
+// 2. PROCESSING: Recognition OFF, calling API
+// 3. SPEAKING: Recognition OFF, playing audio
+// 4. Audio ends -> Back to LISTENING (Recognition ON)
 // ============================================
 
 const VoiceSession: React.FC<VoiceSessionProps> = ({ 
@@ -169,12 +75,9 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({
     onSpeakingStateChange, 
     activeProfile 
 }) => {
-    // ===== TUNED CONFIGURATION =====
     const CONFIG = {
-        SILENCE_THRESHOLD_MS: 1000,    // Back to 1 second for lower latency
-        DEAF_PERIOD_MS: 800,           // Ignore echo for 800ms
+        SILENCE_THRESHOLD_MS: 1200,  // Wait 1.2s of silence before processing
         MIN_TRANSCRIPT_LENGTH: 2,
-        RESTART_DELAY_MS: 100,
     };
 
     // ===== STATE =====
@@ -190,14 +93,12 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({
 
     // ===== REFS =====
     const isActiveRef = useRef(false);
-    const statusRef = useRef<'idle' | 'listening' | 'processing' | 'speaking'>('idle');
+    const statusRef = useRef(status);
     const recognitionRef = useRef<SpeechRecognition | null>(null);
-    const audioQueueRef = useRef<AudioQueue | null>(null);
+    const audioRef = useRef<HTMLAudioElement | null>(null);
     const silenceTimerRef = useRef<NodeJS.Timeout | null>(null);
-    const deafUntilRef = useRef<number>(0);
-    const accumulatedTextRef = useRef<string>('');
+    const accumulatedTextRef = useRef('');
 
-    // Sync status ref
     useEffect(() => { statusRef.current = status; }, [status]);
 
     const addLog = (msg: string) => {
@@ -206,42 +107,127 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({
         setDebugLogs(prev => [...prev.slice(-4), `${ts}: ${msg}`]);
     };
 
-    // ===== AUDIO QUEUE CALLBACKS =====
-    const handlePlaybackStart = useCallback(() => {
+    // ===== START LISTENING =====
+    const startListening = useCallback(() => {
+        if (!isActiveRef.current || !recognitionRef.current) return;
+        if (statusRef.current !== 'listening') return;
+
+        try {
+            recognitionRef.current.start();
+            addLog('🎤 Listening...');
+        } catch (e: any) {
+            if (!e.message?.includes('already started')) {
+                setTimeout(() => startListening(), 200);
+            }
+        }
+    }, []);
+
+    // ===== STOP LISTENING =====
+    const stopListening = useCallback(() => {
+        if (recognitionRef.current) {
+            try { recognitionRef.current.abort(); } catch (e) {}
+        }
+        if (silenceTimerRef.current) {
+            clearTimeout(silenceTimerRef.current);
+            silenceTimerRef.current = null;
+        }
+    }, []);
+
+    // ===== PLAY AI AUDIO =====
+    const playAudio = useCallback(async (text: string) => {
+        if (!isActiveRef.current) return;
+
+        // CRITICAL: Stop recognition completely before speaking
+        stopListening();
+        
         setStatus('speaking');
         if (onSpeakingStateChange) onSpeakingStateChange(true);
-        // Set deaf period - ignore all input for next 800ms
-        deafUntilRef.current = Date.now() + CONFIG.DEAF_PERIOD_MS;
-        addLog('🔊 Playing audio...');
-    }, [onSpeakingStateChange, CONFIG.DEAF_PERIOD_MS]);
+        addLog('🔊 Speaking...');
 
-    const handlePlaybackEnd = useCallback(() => {
-        if (!isActiveRef.current) return;
-        
-        if (onSpeakingStateChange) onSpeakingStateChange(false);
-        setStatus('listening');
-        setTranscript('');
-        setInterimTranscript('');
-        accumulatedTextRef.current = '';
-        addLog('🎤 Ready to listen');
-        
-        // Restart recognition
-        setTimeout(() => {
-            if (isActiveRef.current && recognitionRef.current) {
-                try {
-                    recognitionRef.current.start();
-                } catch (e) {}
+        const gender = activeProfile?.gender || 'female';
+
+        try {
+            const response = await fetch('/api/speak', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ message: text, gender }),
+            });
+
+            if (!response.ok) throw new Error('TTS failed');
+
+            const audioBlob = await response.blob();
+            const audioUrl = URL.createObjectURL(audioBlob);
+            const audio = new Audio(audioUrl);
+            audioRef.current = audio;
+
+            // When audio finishes, restart listening
+            audio.onended = () => {
+                URL.revokeObjectURL(audioUrl);
+                audioRef.current = null;
+                addLog('✓ Audio complete');
+                
+                if (onSpeakingStateChange) onSpeakingStateChange(false);
+                
+                if (isActiveRef.current) {
+                    setStatus('listening');
+                    setTranscript('');
+                    setInterimTranscript('');
+                    accumulatedTextRef.current = '';
+                    // Small delay then restart recognition
+                    setTimeout(() => {
+                        if (isActiveRef.current) {
+                            startListening();
+                        }
+                    }, 300);
+                }
+            };
+
+            audio.onerror = () => {
+                URL.revokeObjectURL(audioUrl);
+                audioRef.current = null;
+                addLog('Audio error - using fallback');
+                playFallbackTTS(text);
+            };
+
+            await audio.play();
+
+        } catch (err) {
+            console.error('TTS error:', err);
+            playFallbackTTS(text);
+        }
+    }, [activeProfile, onSpeakingStateChange, stopListening, startListening]);
+
+    // ===== FALLBACK BROWSER TTS =====
+    const playFallbackTTS = useCallback((text: string) => {
+        window.speechSynthesis.cancel();
+        const utterance = new SpeechSynthesisUtterance(text);
+        utterance.rate = 0.9;
+
+        utterance.onend = () => {
+            if (onSpeakingStateChange) onSpeakingStateChange(false);
+            
+            if (isActiveRef.current) {
+                setStatus('listening');
+                setTranscript('');
+                setInterimTranscript('');
+                accumulatedTextRef.current = '';
+                setTimeout(() => {
+                    if (isActiveRef.current) {
+                        startListening();
+                    }
+                }, 300);
             }
-        }, CONFIG.RESTART_DELAY_MS);
-    }, [onSpeakingStateChange, CONFIG.RESTART_DELAY_MS]);
-
-    // Initialize AudioQueue once
-    useEffect(() => {
-        audioQueueRef.current = new AudioQueue(handlePlaybackStart, handlePlaybackEnd);
-        return () => {
-            audioQueueRef.current?.stop();
         };
-    }, [handlePlaybackStart, handlePlaybackEnd]);
+
+        utterance.onerror = () => {
+            if (isActiveRef.current) {
+                setStatus('listening');
+                setTimeout(() => startListening(), 300);
+            }
+        };
+
+        window.speechSynthesis.speak(utterance);
+    }, [onSpeakingStateChange, startListening]);
 
     // ===== PROCESS USER SPEECH =====
     const processUserSpeech = useCallback(async (text: string) => {
@@ -250,9 +236,7 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({
         }
 
         // Stop listening during processing
-        if (recognitionRef.current) {
-            try { recognitionRef.current.stop(); } catch (e) {}
-        }
+        stopListening();
 
         setStatus('processing');
         setIsThinking(true);
@@ -260,88 +244,34 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({
         addLog(`🤔 Processing: "${text.substring(0, 40)}..."`);
 
         try {
-            // Get AI response
-            const chatResponse = await fetch('/api/chat', {
+            const response = await fetch('/api/chat', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ message: text, profile: activeProfile }),
             });
 
-            if (!chatResponse.ok) throw new Error(`Chat API: ${chatResponse.status}`);
+            if (!response.ok) throw new Error(`API: ${response.status}`);
 
-            const { text: aiText } = await chatResponse.json();
+            const { text: aiText } = await response.json();
             const responseText = aiText || "I'm here with you.";
             
             setAiResponse(responseText);
             setIsThinking(false);
             addLog(`AI: "${responseText.substring(0, 30)}..."`);
 
-            // Get TTS audio - INSTANT START
-            const ttsResponse = await fetch('/api/speak', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ 
-                    message: responseText, 
-                    gender: activeProfile?.gender || 'female' 
-                }),
-            });
-
-            if (!ttsResponse.ok) throw new Error('TTS failed');
-
-            // Push to queue immediately - plays instantly
-            const audioBlob = await ttsResponse.blob();
-            audioQueueRef.current?.push(audioBlob);
+            // Play the response
+            await playAudio(responseText);
 
         } catch (err: any) {
             console.error('Process error:', err);
             setIsThinking(false);
             addLog(`Error: ${err.message}`);
             
-            // Fallback with browser TTS
-            const fallback = "I'm here with you. Take your time.";
+            const fallback = "I'm here with you.";
             setAiResponse(fallback);
-            playBrowserTTS(fallback);
+            await playAudio(fallback);
         }
-    }, [activeProfile, CONFIG.MIN_TRANSCRIPT_LENGTH]);
-
-    // ===== BROWSER TTS FALLBACK =====
-    const playBrowserTTS = useCallback((text: string) => {
-        window.speechSynthesis.cancel();
-        const utterance = new SpeechSynthesisUtterance(text);
-        utterance.rate = 0.9;
-        
-        utterance.onstart = () => {
-            setStatus('speaking');
-            if (onSpeakingStateChange) onSpeakingStateChange(true);
-            deafUntilRef.current = Date.now() + CONFIG.DEAF_PERIOD_MS;
-        };
-        
-        utterance.onend = () => {
-            if (onSpeakingStateChange) onSpeakingStateChange(false);
-            if (isActiveRef.current) {
-                setStatus('listening');
-                setTranscript('');
-                accumulatedTextRef.current = '';
-                setTimeout(() => {
-                    if (isActiveRef.current && recognitionRef.current) {
-                        try { recognitionRef.current.start(); } catch (e) {}
-                    }
-                }, CONFIG.RESTART_DELAY_MS);
-            }
-        };
-        
-        window.speechSynthesis.speak(utterance);
-    }, [onSpeakingStateChange, CONFIG.DEAF_PERIOD_MS, CONFIG.RESTART_DELAY_MS]);
-
-    // ===== SMART BARGE-IN =====
-    useEffect(() => {
-        // Only trigger if user speaks while AI is playing AND deaf period is over
-        if (isUserSpeaking && status === 'speaking' && Date.now() > deafUntilRef.current) {
-            addLog('⚡ Barge-in - fading out');
-            audioQueueRef.current?.fadeOutAndClear();
-            window.speechSynthesis.cancel();
-        }
-    }, [isUserSpeaking, status]);
+    }, [activeProfile, CONFIG.MIN_TRANSCRIPT_LENGTH, stopListening, playAudio]);
 
     // ===== INITIALIZE SPEECH RECOGNITION =====
     useEffect(() => {
@@ -357,16 +287,11 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({
         recognition.lang = 'en-US';
 
         recognition.onstart = () => {
-            addLog('Recognition started');
             setError(null);
         };
 
         recognition.onspeechstart = () => {
-            // Ignore if in deaf period
-            if (Date.now() < deafUntilRef.current) return;
-            
             setIsUserSpeaking(true);
-            // Clear silence timer - user is speaking
             if (silenceTimerRef.current) {
                 clearTimeout(silenceTimerRef.current);
                 silenceTimerRef.current = null;
@@ -378,9 +303,7 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({
         };
 
         recognition.onresult = (event: SpeechRecognitionEvent) => {
-            if (!isActiveRef.current) return;
-            // Ignore during deaf period
-            if (Date.now() < deafUntilRef.current) return;
+            if (!isActiveRef.current || statusRef.current !== 'listening') return;
 
             let interim = '';
             let final = '';
@@ -401,15 +324,12 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({
                 const accumulated = accumulatedTextRef.current.trim();
                 setTranscript(accumulated);
 
-                // Reset silence timer - 1 second
                 if (silenceTimerRef.current) {
                     clearTimeout(silenceTimerRef.current);
                 }
 
                 silenceTimerRef.current = setTimeout(() => {
-                    if (isActiveRef.current && 
-                        statusRef.current === 'listening' && 
-                        accumulated.length >= CONFIG.MIN_TRANSCRIPT_LENGTH) {
+                    if (isActiveRef.current && statusRef.current === 'listening') {
                         processUserSpeech(accumulated);
                     }
                 }, CONFIG.SILENCE_THRESHOLD_MS);
@@ -422,22 +342,16 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({
                 isActiveRef.current = false;
                 setIsSessionActive(false);
                 setStatus('idle');
-            } else if (event.error === 'no-speech' || event.error === 'aborted') {
-                // Restart if still active and in listening mode
-                if (isActiveRef.current && statusRef.current === 'listening') {
-                    setTimeout(() => {
-                        try { recognition.start(); } catch (e) {}
-                    }, CONFIG.RESTART_DELAY_MS);
-                }
+            } else if ((event.error === 'no-speech' || event.error === 'aborted') && 
+                       isActiveRef.current && statusRef.current === 'listening') {
+                setTimeout(() => startListening(), 200);
             }
         };
 
         recognition.onend = () => {
-            // Auto-restart if active and listening
+            // Only auto-restart if we're supposed to be listening
             if (isActiveRef.current && statusRef.current === 'listening') {
-                setTimeout(() => {
-                    try { recognition.start(); } catch (e) {}
-                }, CONFIG.RESTART_DELAY_MS);
+                setTimeout(() => startListening(), 200);
             }
         };
 
@@ -448,12 +362,11 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({
             if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
             recognition.abort();
         };
-    }, [processUserSpeech, CONFIG]);
+    }, [processUserSpeech, startListening, CONFIG.SILENCE_THRESHOLD_MS]);
 
     // ===== START SESSION =====
     const handleStartSession = useCallback(async () => {
         try {
-            // Request mic with echo cancellation
             await navigator.mediaDevices.getUserMedia({
                 audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
             });
@@ -472,11 +385,8 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({
         accumulatedTextRef.current = '';
 
         addLog('🚀 Session started');
-
-        if (recognitionRef.current) {
-            try { recognitionRef.current.start(); } catch (e) {}
-        }
-    }, []);
+        startListening();
+    }, [startListening]);
 
     // ===== END SESSION =====
     const handleEndSession = useCallback(() => {
@@ -486,54 +396,38 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({
         setIsSessionActive(false);
         setStatus('idle');
 
-        if (silenceTimerRef.current) {
-            clearTimeout(silenceTimerRef.current);
-            silenceTimerRef.current = null;
+        stopListening();
+        
+        if (audioRef.current) {
+            audioRef.current.pause();
+            audioRef.current = null;
         }
-
-        recognitionRef.current?.abort();
-        audioQueueRef.current?.stop();
+        
         window.speechSynthesis.cancel();
-
         onEndSession();
-    }, [onEndSession]);
+    }, [onEndSession, stopListening]);
 
     // ===== RENDER =====
     return (
         <div className={styles.voiceSessionContainer}>
-            {/* Error Alert */}
             {error && (
                 <motion.div
                     initial={{ opacity: 0, y: -20 }}
                     animate={{ opacity: 1, y: 0 }}
                     style={{
-                        position: 'absolute',
-                        top: '1rem',
-                        left: '50%',
-                        transform: 'translateX(-50%)',
-                        backgroundColor: 'rgba(239, 68, 68, 0.9)',
-                        color: 'white',
-                        padding: '0.75rem 1.5rem',
-                        borderRadius: '8px',
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '0.5rem',
-                        zIndex: 50,
-                        maxWidth: '90%',
+                        position: 'absolute', top: '1rem', left: '50%', transform: 'translateX(-50%)',
+                        backgroundColor: 'rgba(239, 68, 68, 0.9)', color: 'white',
+                        padding: '0.75rem 1.5rem', borderRadius: '8px',
+                        display: 'flex', alignItems: 'center', gap: '0.5rem',
+                        zIndex: 50, maxWidth: '90%',
                     }}
                 >
                     <AlertCircle size={20} />
                     <span>{error}</span>
-                    <button
-                        onClick={() => setError(null)}
-                        style={{ marginLeft: '1rem', background: 'none', border: 'none', color: 'white', cursor: 'pointer' }}
-                    >
-                        ✕
-                    </button>
+                    <button onClick={() => setError(null)} style={{ marginLeft: '1rem', background: 'none', border: 'none', color: 'white', cursor: 'pointer' }}>✕</button>
                 </motion.div>
             )}
 
-            {/* START BUTTON */}
             {!isSessionActive && (
                 <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', justifyContent: 'center', height: '100%', zIndex: 20 }}>
                     <button onClick={handleStartSession} className={styles.startButton}>
@@ -542,53 +436,40 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({
                 </div>
             )}
 
-            {/* ACTIVE SESSION */}
             {isSessionActive && (
                 <>
-                    {/* Ripples */}
                     <div className={styles.rippleContainer}>
                         {status === 'speaking' && (
-                            <motion.div
-                                className={styles.rippleSpeaking}
+                            <motion.div className={styles.rippleSpeaking}
                                 animate={{ scale: [1, 1.5, 1], opacity: [0.5, 0, 0.5] }}
-                                transition={{ duration: 2, repeat: Infinity }}
-                            />
+                                transition={{ duration: 2, repeat: Infinity }} />
                         )}
                         {isThinking && (
-                            <motion.div
-                                className={styles.rippleProcessing}
+                            <motion.div className={styles.rippleProcessing}
                                 animate={{ rotate: 360 }}
-                                transition={{ duration: 2, repeat: Infinity, ease: "linear" }}
-                            />
+                                transition={{ duration: 2, repeat: Infinity, ease: "linear" }} />
                         )}
                         {isUserSpeaking && !isThinking && (
-                            <motion.div
-                                className={styles.rippleListening}
+                            <motion.div className={styles.rippleListening}
                                 style={{ borderColor: '#ef4444', backgroundColor: 'rgba(239, 68, 68, 0.1)' }}
                                 animate={{ scale: [1, 1.3, 1], opacity: [0.6, 0.2, 0.6] }}
-                                transition={{ duration: 0.8, repeat: Infinity }}
-                            />
+                                transition={{ duration: 0.8, repeat: Infinity }} />
                         )}
                         {!isUserSpeaking && !isThinking && status === 'listening' && (
-                            <motion.div
-                                className={styles.rippleListening}
+                            <motion.div className={styles.rippleListening}
                                 animate={{ scale: [1, 1.1, 1], opacity: [0.3, 0.1, 0.3] }}
-                                transition={{ duration: 3, repeat: Infinity }}
-                            />
+                                transition={{ duration: 3, repeat: Infinity }} />
                         )}
                     </div>
 
-                    {/* Status */}
                     <p className={styles.statusText}>
                         <span className={styles.statusLabel}>
                             {isUserSpeaking ? "Listening..." :
                                 isThinking ? "Thinking..." :
-                                    status === 'speaking' ? "Speaking..." :
-                                        "Listening..."}
+                                    status === 'speaking' ? "Speaking..." : "Listening..."}
                         </span>
                     </p>
 
-                    {/* Transcript */}
                     {!error && (
                         <div className={styles.transcriptContainer}>
                             {(transcript || interimTranscript) && (
@@ -604,18 +485,13 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({
                         </div>
                     )}
 
-                    {/* Debug */}
                     <div style={{ marginTop: '1rem', width: '100%', fontSize: '0.7rem', color: '#888', fontFamily: 'monospace', background: 'rgba(0,0,0,0.2)', padding: '0.5rem', borderRadius: '4px' }}>
                         {debugLogs.map((log, i) => <div key={i}>{log}</div>)}
                     </div>
 
-                    {/* End Button */}
                     <div style={{ marginTop: 'auto', display: 'flex', gap: '1rem' }}>
-                        <button
-                            className={styles.endButton}
-                            onClick={handleEndSession}
-                            style={{ borderColor: 'rgba(239, 68, 68, 0.5)', color: '#fca5a5', background: 'rgba(239, 68, 68, 0.1)' }}
-                        >
+                        <button className={styles.endButton} onClick={handleEndSession}
+                            style={{ borderColor: 'rgba(239, 68, 68, 0.5)', color: '#fca5a5', background: 'rgba(239, 68, 68, 0.1)' }}>
                             End Conversation
                         </button>
                     </div>
@@ -626,3 +502,4 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({
 };
 
 export default VoiceSession;
+
