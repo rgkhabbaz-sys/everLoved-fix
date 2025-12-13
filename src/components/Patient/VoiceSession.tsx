@@ -5,9 +5,6 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import styles from './Patient.module.css';
 import { Mic, AlertCircle } from 'lucide-react';
 
-// ============================================
-// TYPE DEFINITIONS
-// ============================================
 interface VoiceSessionProps {
     onEndSession: () => void;
     onSpeakingStateChange?: (isSpeaking: boolean) => void;
@@ -48,32 +45,16 @@ interface SpeechRecognitionInstance {
     onend: () => void;
 }
 
-// ============================================
-// EVERLOVED VOICE SESSION v4.0
-// STABILITY FIRST - NO SELF-INTERRUPTION
-// ============================================
-// 
-// Key principle: Recognition is COMPLETELY OFF while AI speaks.
-// No barge-in. No echo detection issues. Rock solid.
-//
-// Flow:
-// 1. LISTENING: Recognition ON, waiting for user
-// 2. PROCESSING: Recognition OFF, calling API
-// 3. SPEAKING: Recognition OFF, playing audio
-// 4. Audio ends -> Back to LISTENING (Recognition ON)
-// ============================================
-
 const VoiceSession: React.FC<VoiceSessionProps> = ({ 
     onEndSession, 
     onSpeakingStateChange, 
     activeProfile 
 }) => {
     const CONFIG = {
-        SILENCE_THRESHOLD_MS: 600,  // 600ms for faster response
+        SILENCE_THRESHOLD_MS: 1000,
         MIN_TRANSCRIPT_LENGTH: 2,
     };
 
-    // ===== STATE =====
     const [isSessionActive, setIsSessionActive] = useState(false);
     const [status, setStatus] = useState<'idle' | 'listening' | 'processing' | 'speaking'>('idle');
     const [isUserSpeaking, setIsUserSpeaking] = useState(false);
@@ -84,7 +65,6 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({
     const [error, setError] = useState<string | null>(null);
     const [isThinking, setIsThinking] = useState(false);
 
-    // ===== REFS =====
     const isActiveRef = useRef(false);
     const statusRef = useRef(status);
     const recognitionRef = useRef<SpeechRecognitionInstance | null>(null);
@@ -99,7 +79,6 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({
         setDebugLogs(prev => [...prev.slice(-4), `${ts}: ${msg}`]);
     };
 
-    // ===== START LISTENING =====
     const startListening = useCallback(() => {
         if (!isActiveRef.current || !recognitionRef.current) return;
         if (statusRef.current !== 'listening') return;
@@ -114,7 +93,6 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({
         }
     }, []);
 
-    // ===== STOP LISTENING =====
     const stopListening = useCallback(() => {
         if (recognitionRef.current) {
             try { recognitionRef.current.abort(); } catch (e) {}
@@ -125,66 +103,14 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({
         }
     }, []);
 
-    // ===== PLAY AI AUDIO - ELEVENLABS WITH BROWSER FALLBACK =====
-    const playAudio = useCallback(async (text: string) => {
+    const playAudio = useCallback((text: string) => {
         if (!isActiveRef.current) return;
 
-        // CRITICAL: Stop recognition completely before speaking
         stopListening();
-        
         setStatus('speaking');
         if (onSpeakingStateChange) onSpeakingStateChange(true);
         addLog('🔊 Speaking...');
 
-        const gender = activeProfile?.gender || 'female';
-
-        try {
-            // Try ElevenLabs for high-quality voice
-            const response = await fetch('/api/speak', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ message: text, gender }),
-            });
-
-            if (!response.ok) throw new Error('TTS failed');
-
-            const audioBlob = await response.blob();
-            const audioUrl = URL.createObjectURL(audioBlob);
-            const audio = new Audio(audioUrl);
-
-            audio.onended = () => {
-                URL.revokeObjectURL(audioUrl);
-                addLog('✓ Speech complete');
-                if (onSpeakingStateChange) onSpeakingStateChange(false);
-                
-                if (isActiveRef.current) {
-                    setStatus('listening');
-                    setTranscript('');
-                    setInterimTranscript('');
-                    accumulatedTextRef.current = '';
-                    setTimeout(() => {
-                        if (isActiveRef.current) startListening();
-                    }, 200);
-                }
-            };
-
-            audio.onerror = () => {
-                URL.revokeObjectURL(audioUrl);
-                addLog('Audio error - using fallback');
-                playBrowserTTS(text);
-            };
-
-            await audio.play();
-
-        } catch (err) {
-            console.error('ElevenLabs error:', err);
-            addLog('ElevenLabs failed - using browser TTS');
-            playBrowserTTS(text);
-        }
-    }, [activeProfile, onSpeakingStateChange, stopListening, startListening]);
-
-    // ===== BROWSER TTS FALLBACK =====
-    const playBrowserTTS = useCallback((text: string) => {
         window.speechSynthesis.cancel();
         const utterance = new SpeechSynthesisUtterance(text);
         
@@ -196,11 +122,11 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({
         );
         if (preferredVoice) utterance.voice = preferredVoice;
         
-        utterance.rate = 0.95;
+        utterance.rate = 0.9;
         utterance.pitch = 1;
 
         utterance.onend = () => {
-            addLog('✓ Speech complete');
+            addLog('✓ Done speaking');
             if (onSpeakingStateChange) onSpeakingStateChange(false);
             
             if (isActiveRef.current) {
@@ -210,7 +136,7 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({
                 accumulatedTextRef.current = '';
                 setTimeout(() => {
                     if (isActiveRef.current) startListening();
-                }, 200);
+                }, 300);
             }
         };
 
@@ -218,26 +144,23 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({
             if (onSpeakingStateChange) onSpeakingStateChange(false);
             if (isActiveRef.current) {
                 setStatus('listening');
-                setTimeout(() => startListening(), 200);
+                setTimeout(() => startListening(), 300);
             }
         };
 
         window.speechSynthesis.speak(utterance);
-    }, [onSpeakingStateChange, startListening]);
+    }, [onSpeakingStateChange, stopListening, startListening]);
 
-    // ===== PROCESS USER SPEECH =====
     const processUserSpeech = useCallback(async (text: string) => {
         if (!text.trim() || text.length < CONFIG.MIN_TRANSCRIPT_LENGTH || !isActiveRef.current) {
             return;
         }
 
-        // Stop listening during processing
         stopListening();
-
         setStatus('processing');
         setIsThinking(true);
         accumulatedTextRef.current = '';
-        addLog(`🤔 Processing: "${text.substring(0, 40)}..."`);
+        addLog(`🤔 Processing...`);
 
         try {
             const response = await fetch('/api/chat', {
@@ -253,23 +176,19 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({
             
             setAiResponse(responseText);
             setIsThinking(false);
-            addLog(`AI: "${responseText.substring(0, 30)}..."`);
+            addLog(`AI responded`);
 
-            // Play the response
-            await playAudio(responseText);
+            playAudio(responseText);
 
         } catch (err: any) {
-            console.error('Process error:', err);
+            console.error('Error:', err);
             setIsThinking(false);
-            addLog(`Error: ${err.message}`);
-            
             const fallback = "I'm here with you.";
             setAiResponse(fallback);
-            await playAudio(fallback);
+            playAudio(fallback);
         }
     }, [activeProfile, CONFIG.MIN_TRANSCRIPT_LENGTH, stopListening, playAudio]);
 
-    // ===== INITIALIZE SPEECH RECOGNITION =====
     useEffect(() => {
         const SpeechRecognitionAPI = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
         if (!SpeechRecognitionAPI) {
@@ -282,9 +201,7 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({
         recognition.interimResults = true;
         recognition.lang = 'en-US';
 
-        recognition.onstart = () => {
-            setError(null);
-        };
+        recognition.onstart = () => setError(null);
 
         recognition.onspeechstart = () => {
             setIsUserSpeaking(true);
@@ -294,9 +211,7 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({
             }
         };
 
-        recognition.onspeechend = () => {
-            setIsUserSpeaking(false);
-        };
+        recognition.onspeechend = () => setIsUserSpeaking(false);
 
         recognition.onresult = (event: SpeechRecognitionEvent) => {
             if (!isActiveRef.current || statusRef.current !== 'listening') return;
@@ -320,9 +235,7 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({
                 const accumulated = accumulatedTextRef.current.trim();
                 setTranscript(accumulated);
 
-                if (silenceTimerRef.current) {
-                    clearTimeout(silenceTimerRef.current);
-                }
+                if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
 
                 silenceTimerRef.current = setTimeout(() => {
                     if (isActiveRef.current && statusRef.current === 'listening') {
@@ -345,7 +258,6 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({
         };
 
         recognition.onend = () => {
-            // Only auto-restart if we're supposed to be listening
             if (isActiveRef.current && statusRef.current === 'listening') {
                 setTimeout(() => startListening(), 200);
             }
@@ -360,7 +272,6 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({
         };
     }, [processUserSpeech, startListening, CONFIG.SILENCE_THRESHOLD_MS]);
 
-    // ===== START SESSION =====
     const handleStartSession = useCallback(async () => {
         try {
             await navigator.mediaDevices.getUserMedia({
@@ -371,15 +282,7 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({
             return;
         }
 
-        // Pre-warm browser TTS voices
         window.speechSynthesis.getVoices();
-        
-        // Pre-warm ElevenLabs connection (silent request to warm up API)
-        fetch('/api/speak', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ message: '.', gender: 'female' }),
-        }).catch(() => {}); // Ignore errors, just warming up
 
         isActiveRef.current = true;
         setIsSessionActive(true);
@@ -394,20 +297,16 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({
         startListening();
     }, [startListening]);
 
-    // ===== END SESSION =====
     const handleEndSession = useCallback(() => {
         addLog('🛑 Session ended');
-        
         isActiveRef.current = false;
         setIsSessionActive(false);
         setStatus('idle');
-
         stopListening();
         window.speechSynthesis.cancel();
         onEndSession();
     }, [onEndSession, stopListening]);
 
-    // ===== RENDER =====
     return (
         <div className={styles.voiceSessionContainer}>
             {error && (
