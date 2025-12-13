@@ -62,7 +62,42 @@ declare global {
     }
 }
 
+// ============================================
+// EVERLOVED VOICE SESSION v2.0
+// "PATIENT LISTENER" MODE FOR ALZHEIMER'S CARE
+// ============================================
+// 
+// PROTOCOL 1: Echo Cancellation & "Deaf" Periods
+// - 1000ms safety buffer when AI starts speaking
+// - Ignore all speech detection during playback start
+//
+// PROTOCOL 2: Patient Listener VAD
+// - 2000ms silence threshold (wait for slow speakers)
+// - 300ms minimum speech duration (ignore coughs/clicks)
+//
+// PROTOCOL 3: Stability over Speed
+// - Never interrupt patient mid-thought
+// - Graceful degradation on errors
+// ============================================
+
 const VoiceSession: React.FC<VoiceSessionProps> = ({ onEndSession, onSpeakingStateChange, activeProfile }) => {
+    // ===== CONFIGURATION =====
+    const CONFIG = {
+        // PROTOCOL 2: Patient Listener Settings
+        SILENCE_THRESHOLD_MS: 2000,      // Wait 2 seconds of silence before processing
+        MIN_SPEECH_DURATION_MS: 300,     // Ignore sounds shorter than 300ms
+        
+        // PROTOCOL 1: Echo Cancellation Settings
+        DEAF_PERIOD_MS: 1000,            // Ignore speech detection for 1s after AI starts speaking
+        RESTART_DELAY_MS: 150,           // Delay before restarting listener
+        
+        // Confidence threshold
+        MIN_TRANSCRIPT_LENGTH: 2,        // Minimum characters to process
+    };
+
+    // ===== GLOBAL KILL SWITCH =====
+    const isConversationActiveRef = useRef(false);
+    
     // Session State
     const [isSessionActive, setIsSessionActive] = useState(false);
 
@@ -70,107 +105,116 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({ onEndSession, onSpeakingSta
     const [status, setStatus] = useState<'idle' | 'listening' | 'processing' | 'speaking'>('idle');
     const [isUserSpeaking, setIsUserSpeaking] = useState(false);
     const [transcript, setTranscript] = useState('');
+    const [interimTranscript, setInterimTranscript] = useState('');
     const [aiResponse, setAiResponse] = useState('');
     const [debugLogs, setDebugLogs] = useState<string[]>([]);
     const [error, setError] = useState<string | null>(null);
     const [isThinking, setIsThinking] = useState(false);
     
+    // Refs
     const audioRef = useRef<HTMLAudioElement | null>(null);
     const recognitionRef = useRef<SpeechRecognition | null>(null);
-    const isSessionActiveRef = useRef(false);
+    const statusRef = useRef<'idle' | 'listening' | 'processing' | 'speaking'>('idle');
+    const mediaStreamRef = useRef<MediaStream | null>(null);
+    
+    // PROTOCOL 1: Deaf Period Tracking
+    const isInDeafPeriodRef = useRef(false);
+    const deafPeriodTimerRef = useRef<NodeJS.Timeout | null>(null);
+    
+    // PROTOCOL 2: Speech Timing
+    const silenceTimerRef = useRef<NodeJS.Timeout | null>(null);
+    const speechStartTimeRef = useRef<number | null>(null);
+    const accumulatedTranscriptRef = useRef<string>('');
+
+    // Keep statusRef in sync
+    useEffect(() => {
+        statusRef.current = status;
+    }, [status]);
 
     const addLog = (msg: string) => {
-        setDebugLogs(prev => [...prev.slice(-4), `${new Date().toLocaleTimeString()}: ${msg}`]);
+        const timestamp = new Date().toLocaleTimeString();
+        console.log(`[EverLoved] ${timestamp}: ${msg}`);
+        setDebugLogs(prev => [...prev.slice(-4), `${timestamp}: ${msg}`]);
     };
 
-    // Initialize Speech Recognition
-    useEffect(() => {
-        const SpeechRecognitionAPI = window.SpeechRecognition || window.webkitSpeechRecognition;
+    // ===== PROTOCOL 1: START DEAF PERIOD =====
+    const startDeafPeriod = useCallback(() => {
+        isInDeafPeriodRef.current = true;
+        addLog(`🔇 Deaf period started (${CONFIG.DEAF_PERIOD_MS}ms)`);
         
-        if (!SpeechRecognitionAPI) {
-            setError('Speech recognition not supported in this browser. Please use Chrome, Edge, or Safari.');
+        if (deafPeriodTimerRef.current) {
+            clearTimeout(deafPeriodTimerRef.current);
+        }
+        
+        deafPeriodTimerRef.current = setTimeout(() => {
+            isInDeafPeriodRef.current = false;
+            addLog('👂 Deaf period ended - listening for user');
+        }, CONFIG.DEAF_PERIOD_MS);
+    }, [CONFIG.DEAF_PERIOD_MS]);
+
+    // ===== INITIALIZE MEDIA WITH ECHO CANCELLATION =====
+    const initializeMedia = useCallback(async () => {
+        try {
+            // PROTOCOL 1: Aggressive echo cancellation
+            const stream = await navigator.mediaDevices.getUserMedia({
+                audio: {
+                    echoCancellation: true,
+                    noiseSuppression: true,
+                    autoGainControl: true,
+                    // Additional constraints for cleaner audio
+                    channelCount: 1,
+                    sampleRate: 16000,
+                }
+            });
+            mediaStreamRef.current = stream;
+            addLog('🎙️ Microphone initialized with echo cancellation');
+            return true;
+        } catch (err) {
+            console.error('Media initialization error:', err);
+            setError('Microphone access denied. Please allow microphone access.');
+            return false;
+        }
+    }, []);
+
+    // ===== START LISTENING =====
+    const startListening = useCallback(() => {
+        // Check kill switch
+        if (!isConversationActiveRef.current) {
+            addLog('Kill switch active - not starting');
+            return;
+        }
+        
+        if (!recognitionRef.current) {
+            addLog('No recognition available');
             return;
         }
 
-        const recognition = new SpeechRecognitionAPI();
-        recognition.continuous = true;
-        recognition.interimResults = true;
-        recognition.lang = 'en-US';
+        // Don't start if processing or speaking
+        if (statusRef.current === 'processing' || statusRef.current === 'speaking') {
+            addLog(`Skipping start - status is ${statusRef.current}`);
+            return;
+        }
 
-        recognition.onstart = () => {
-            addLog('Listening started');
-            setError(null);
-        };
-
-        recognition.onspeechstart = () => {
-            setIsUserSpeaking(true);
-            addLog('Speech detected');
-        };
-
-        recognition.onspeechend = () => {
-            setIsUserSpeaking(false);
-            addLog('Speech ended');
-        };
-
-        recognition.onresult = (event: SpeechRecognitionEvent) => {
-            const lastResult = event.results[event.results.length - 1];
-            const text = lastResult[0].transcript;
-            setTranscript(text);
-
-            if (lastResult.isFinal && text.trim()) {
-                addLog(`Final: "${text.trim()}"`);
-                handleUserSpeech(text.trim());
-            }
-        };
-
-        recognition.onerror = (event: any) => {
-            addLog(`Error: ${event.error}`);
-            
-            if (event.error === 'not-allowed') {
-                setError('Microphone access denied. Please allow microphone access and try again.');
-            } else if (event.error === 'no-speech') {
-                // Restart listening if session is active
-                if (isSessionActiveRef.current && status !== 'processing' && status !== 'speaking') {
-                    setTimeout(() => {
-                        try {
-                            recognition.start();
-                        } catch (e) {
-                            // Ignore if already started
-                        }
-                    }, 100);
-                }
-            } else if (event.error !== 'aborted') {
-                console.error('Speech recognition error:', event.error);
-            }
-        };
-
-        recognition.onend = () => {
-            addLog('Recognition ended');
-            // Auto-restart if session is still active and not processing/speaking
-            if (isSessionActiveRef.current && status !== 'processing' && status !== 'speaking') {
+        try {
+            recognitionRef.current.start();
+            setStatus('listening');
+            addLog('🎤 Listening (Patient Mode)...');
+        } catch (e: any) {
+            if (e.message?.includes('already started')) {
+                setStatus('listening');
+            } else {
+                console.error('Start listening error:', e);
                 setTimeout(() => {
-                    try {
-                        recognition.start();
-                        addLog('Auto-restarted listening');
-                    } catch (e) {
-                        // Ignore if already started
+                    if (isConversationActiveRef.current && statusRef.current === 'idle') {
+                        startListening();
                     }
-                }, 100);
+                }, 500);
             }
-        };
-
-        recognitionRef.current = recognition;
-
-        return () => {
-            recognition.abort();
-        };
+        }
     }, []);
 
-    // Handle user speech - send to AI
-    const handleUserSpeech = async (text: string) => {
-        if (!text.trim() || !isSessionActiveRef.current) return;
-
-        // Stop listening while processing
+    // ===== STOP LISTENING =====
+    const stopListening = useCallback(() => {
         if (recognitionRef.current) {
             try {
                 recognitionRef.current.stop();
@@ -178,10 +222,30 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({ onEndSession, onSpeakingSta
                 // Ignore
             }
         }
+        
+        // Clear timers
+        if (silenceTimerRef.current) {
+            clearTimeout(silenceTimerRef.current);
+            silenceTimerRef.current = null;
+        }
+    }, []);
 
+    // ===== PROCESS USER SPEECH =====
+    const processUserSpeech = useCallback(async (text: string) => {
+        if (!text.trim() || text.length < CONFIG.MIN_TRANSCRIPT_LENGTH) {
+            addLog('Ignoring too-short transcript');
+            return;
+        }
+        
+        if (!isConversationActiveRef.current) return;
+
+        // Transition: LISTENING -> PROCESSING
+        stopListening();
         setStatus('processing');
         setIsThinking(true);
-        addLog('Sending to AI...');
+        setInterimTranscript('');
+        accumulatedTranscriptRef.current = '';
+        addLog(`🤔 Processing: "${text.substring(0, 50)}..."`);
 
         try {
             const response = await fetch('/api/chat', {
@@ -202,9 +266,9 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({ onEndSession, onSpeakingSta
             
             setAiResponse(aiText);
             setIsThinking(false);
-            addLog(`AI: "${aiText.substring(0, 30)}..."`);
+            addLog(`AI: "${aiText.substring(0, 40)}..."`);
 
-            // Speak the response
+            // Transition: PROCESSING -> SPEAKING
             await speakResponse(aiText);
 
         } catch (err: any) {
@@ -212,21 +276,172 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({ onEndSession, onSpeakingSta
             setIsThinking(false);
             addLog(`Error: ${err.message}`);
             
-            // Fallback response
-            const fallbackText = "I'm having a little trouble right now, but I'm here with you.";
+            const fallbackText = "I'm here with you. Take your time.";
             setAiResponse(fallbackText);
             await speakResponse(fallbackText);
         }
-    };
+    }, [activeProfile, stopListening]);
 
-    // Speak the AI response
+    // ===== INITIALIZE SPEECH RECOGNITION =====
+    useEffect(() => {
+        const SpeechRecognitionAPI = window.SpeechRecognition || window.webkitSpeechRecognition;
+        
+        if (!SpeechRecognitionAPI) {
+            setError('Speech recognition not supported. Please use Chrome, Edge, or Safari.');
+            return;
+        }
+
+        const recognition = new SpeechRecognitionAPI();
+        recognition.continuous = true;
+        recognition.interimResults = true;
+        recognition.lang = 'en-US';
+
+        recognition.onstart = () => {
+            addLog('Recognition started');
+            setError(null);
+            accumulatedTranscriptRef.current = '';
+            speechStartTimeRef.current = null;
+        };
+
+        recognition.onspeechstart = () => {
+            // PROTOCOL 1: Ignore during deaf period
+            if (isInDeafPeriodRef.current) {
+                addLog('Speech detected but in deaf period - ignoring');
+                return;
+            }
+            
+            // PROTOCOL 2: Track speech start time
+            speechStartTimeRef.current = Date.now();
+            setIsUserSpeaking(true);
+            addLog('🗣️ User speaking...');
+            
+            // Clear silence timer - user is speaking
+            if (silenceTimerRef.current) {
+                clearTimeout(silenceTimerRef.current);
+                silenceTimerRef.current = null;
+            }
+        };
+
+        recognition.onspeechend = () => {
+            setIsUserSpeaking(false);
+            
+            // PROTOCOL 2: Check minimum speech duration
+            if (speechStartTimeRef.current) {
+                const speechDuration = Date.now() - speechStartTimeRef.current;
+                if (speechDuration < CONFIG.MIN_SPEECH_DURATION_MS) {
+                    addLog(`Speech too short (${speechDuration}ms) - ignoring`);
+                    speechStartTimeRef.current = null;
+                    return;
+                }
+            }
+            
+            addLog('User stopped speaking');
+        };
+
+        recognition.onresult = (event: SpeechRecognitionEvent) => {
+            // Check kill switch
+            if (!isConversationActiveRef.current) return;
+            
+            // PROTOCOL 1: Ignore during deaf period
+            if (isInDeafPeriodRef.current) {
+                return;
+            }
+            
+            let interim = '';
+            let finalText = '';
+
+            for (let i = 0; i < event.results.length; i++) {
+                const result = event.results[i];
+                if (result.isFinal) {
+                    finalText += result[0].transcript;
+                } else {
+                    interim += result[0].transcript;
+                }
+            }
+
+            // Update UI
+            setInterimTranscript(interim);
+            
+            if (finalText) {
+                accumulatedTranscriptRef.current += ' ' + finalText;
+                const accumulated = accumulatedTranscriptRef.current.trim();
+                setTranscript(accumulated);
+                
+                // PROTOCOL 2: Reset silence timer with 2-second patience
+                if (silenceTimerRef.current) {
+                    clearTimeout(silenceTimerRef.current);
+                }
+                
+                addLog(`Waiting ${CONFIG.SILENCE_THRESHOLD_MS}ms for more speech...`);
+                
+                silenceTimerRef.current = setTimeout(() => {
+                    if (isConversationActiveRef.current && 
+                        statusRef.current === 'listening' && 
+                        accumulated.length >= CONFIG.MIN_TRANSCRIPT_LENGTH) {
+                        addLog(`✓ 2s silence - processing speech`);
+                        processUserSpeech(accumulated);
+                    }
+                }, CONFIG.SILENCE_THRESHOLD_MS);
+            }
+        };
+
+        recognition.onerror = (event: any) => {
+            addLog(`Recognition error: ${event.error}`);
+            
+            if (event.error === 'not-allowed') {
+                setError('Microphone access denied. Please allow microphone access.');
+                isConversationActiveRef.current = false;
+                setIsSessionActive(false);
+                setStatus('idle');
+            } else if (event.error === 'no-speech') {
+                // No speech - restart if active and listening
+                if (isConversationActiveRef.current && statusRef.current === 'listening') {
+                    setTimeout(startListening, CONFIG.RESTART_DELAY_MS);
+                }
+            } else if (event.error === 'aborted') {
+                // Intentionally stopped
+                if (isConversationActiveRef.current && 
+                    statusRef.current !== 'processing' && 
+                    statusRef.current !== 'speaking') {
+                    setTimeout(startListening, CONFIG.RESTART_DELAY_MS);
+                }
+            }
+        };
+
+        recognition.onend = () => {
+            addLog('Recognition ended');
+            
+            // Auto-restart for continuous listening
+            if (isConversationActiveRef.current && 
+                statusRef.current !== 'processing' && 
+                statusRef.current !== 'speaking') {
+                setTimeout(startListening, CONFIG.RESTART_DELAY_MS);
+            }
+        };
+
+        recognitionRef.current = recognition;
+
+        return () => {
+            isConversationActiveRef.current = false;
+            if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+            if (deafPeriodTimerRef.current) clearTimeout(deafPeriodTimerRef.current);
+            recognition.abort();
+        };
+    }, [startListening, processUserSpeech, CONFIG]);
+
+    // ===== SPEAK AI RESPONSE =====
     const speakResponse = async (text: string) => {
-        if (!isSessionActiveRef.current) return;
+        if (!isConversationActiveRef.current) return;
 
+        // Transition to speaking
         setStatus('speaking');
         if (onSpeakingStateChange) onSpeakingStateChange(true);
+        
+        // PROTOCOL 1: Start deaf period to prevent self-interruption
+        startDeafPeriod();
+        
+        addLog('🔊 Speaking...');
 
-        // Determine gender from profile
         const gender = activeProfile?.gender || 'female';
 
         try {
@@ -245,27 +460,23 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({ onEndSession, onSpeakingSta
             const audio = new Audio(audioUrl);
             audioRef.current = audio;
 
+            // When audio finishes -> restart listening
             audio.onended = () => {
                 URL.revokeObjectURL(audioUrl);
-                if (isSessionActiveRef.current) {
+                addLog('Audio finished');
+                
+                if (onSpeakingStateChange) onSpeakingStateChange(false);
+                
+                if (isConversationActiveRef.current) {
                     setStatus('listening');
-                    if (onSpeakingStateChange) onSpeakingStateChange(false);
-                    // Resume listening
-                    setTimeout(() => {
-                        if (recognitionRef.current && isSessionActiveRef.current) {
-                            try {
-                                recognitionRef.current.start();
-                                addLog('Resumed listening');
-                            } catch (e) {
-                                // Ignore
-                            }
-                        }
-                    }, 200);
+                    setTranscript('');
+                    setInterimTranscript('');
+                    setTimeout(startListening, CONFIG.RESTART_DELAY_MS);
                 }
             };
 
             audio.onerror = () => {
-                console.warn('Audio playback failed, using fallback TTS');
+                URL.revokeObjectURL(audioUrl);
                 playFallbackTTS(text);
             };
 
@@ -277,15 +488,14 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({ onEndSession, onSpeakingSta
         }
     };
 
-    // Fallback to browser TTS
+    // ===== FALLBACK BROWSER TTS =====
     const playFallbackTTS = (text: string) => {
-        if (!isSessionActiveRef.current) return;
+        if (!isConversationActiveRef.current) return;
 
         window.speechSynthesis.cancel();
 
         const utterance = new SpeechSynthesisUtterance(text);
         
-        // Try to find a good voice
         const voices = window.speechSynthesis.getVoices();
         const preferredVoice = voices.find(v => 
             v.name.includes('Google US English') || 
@@ -294,56 +504,50 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({ onEndSession, onSpeakingSta
         );
         if (preferredVoice) utterance.voice = preferredVoice;
 
-        utterance.rate = 0.9;
+        utterance.rate = 0.85; // Slightly slower for clarity
         utterance.pitch = 1;
 
         utterance.onstart = () => {
             setStatus('speaking');
             if (onSpeakingStateChange) onSpeakingStateChange(true);
+            startDeafPeriod(); // PROTOCOL 1
         };
 
         utterance.onend = () => {
-            if (isSessionActiveRef.current) {
+            addLog('Fallback TTS finished');
+            if (onSpeakingStateChange) onSpeakingStateChange(false);
+            
+            if (isConversationActiveRef.current) {
                 setStatus('listening');
-                if (onSpeakingStateChange) onSpeakingStateChange(false);
-                // Resume listening
-                setTimeout(() => {
-                    if (recognitionRef.current && isSessionActiveRef.current) {
-                        try {
-                            recognitionRef.current.start();
-                        } catch (e) {
-                            // Ignore
-                        }
-                    }
-                }, 200);
+                setTranscript('');
+                setInterimTranscript('');
+                setTimeout(startListening, CONFIG.RESTART_DELAY_MS);
             }
         };
 
         utterance.onerror = () => {
-            setStatus('listening');
             if (onSpeakingStateChange) onSpeakingStateChange(false);
-            if (recognitionRef.current && isSessionActiveRef.current) {
-                try {
-                    recognitionRef.current.start();
-                } catch (e) {
-                    // Ignore
-                }
+            if (isConversationActiveRef.current) {
+                setStatus('listening');
+                setTimeout(startListening, CONFIG.RESTART_DELAY_MS);
             }
         };
 
         window.speechSynthesis.speak(utterance);
     };
 
-    // Barge-in: Stop AI speech when user starts talking
+    // ===== BARGE-IN (Only after deaf period) =====
     useEffect(() => {
-        if (isUserSpeaking && status === 'speaking') {
-            addLog('Barge-in detected');
-            // Stop audio playback
+        // PROTOCOL 1: Only allow barge-in AFTER deaf period
+        if (isUserSpeaking && status === 'speaking' && !isInDeafPeriodRef.current) {
+            addLog('⚡ Barge-in detected - stopping AI');
+            
             if (audioRef.current) {
                 audioRef.current.pause();
                 audioRef.current.currentTime = 0;
+                audioRef.current = null;
             }
-            // Stop browser TTS
+            
             window.speechSynthesis.cancel();
             
             setStatus('listening');
@@ -351,42 +555,50 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({ onEndSession, onSpeakingSta
         }
     }, [isUserSpeaking, status, onSpeakingStateChange]);
 
-    // Start session
+    // ===== START SESSION =====
     const handleStartSession = useCallback(async () => {
+        // Initialize media first
+        const mediaOk = await initializeMedia();
+        if (!mediaOk) return;
+
+        isConversationActiveRef.current = true;
         setIsSessionActive(true);
-        isSessionActiveRef.current = true;
         setStatus('listening');
         setError(null);
         setTranscript('');
+        setInterimTranscript('');
         setAiResponse('');
+        accumulatedTranscriptRef.current = '';
 
-        if (recognitionRef.current) {
-            try {
-                recognitionRef.current.start();
-                addLog('Session started');
-            } catch (e: any) {
-                console.error('Recognition start error:', e);
-                setError('Failed to start microphone. Please check permissions.');
-                setIsSessionActive(false);
-                isSessionActiveRef.current = false;
-                setStatus('idle');
-            }
-        }
-    }, []);
+        addLog('🚀 Session started - Patient Listener Mode');
+        addLog(`⏱️ Silence threshold: ${CONFIG.SILENCE_THRESHOLD_MS}ms`);
+        
+        startListening();
+    }, [initializeMedia, startListening, CONFIG.SILENCE_THRESHOLD_MS]);
 
-    // End session
+    // ===== END SESSION =====
     const handleEndSession = useCallback(() => {
+        addLog('🛑 Session ended');
+        
+        isConversationActiveRef.current = false;
         setIsSessionActive(false);
-        isSessionActiveRef.current = false;
         setStatus('idle');
+
+        // Clear all timers
+        if (silenceTimerRef.current) {
+            clearTimeout(silenceTimerRef.current);
+            silenceTimerRef.current = null;
+        }
+        if (deafPeriodTimerRef.current) {
+            clearTimeout(deafPeriodTimerRef.current);
+            deafPeriodTimerRef.current = null;
+        }
 
         // Stop recognition
         if (recognitionRef.current) {
             try {
-                recognitionRef.current.stop();
-            } catch (e) {
-                // Ignore
-            }
+                recognitionRef.current.abort();
+            } catch (e) {}
         }
 
         // Stop audio
@@ -395,10 +607,15 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({ onEndSession, onSpeakingSta
             audioRef.current = null;
         }
 
-        // Stop browser TTS
+        // Stop TTS
         window.speechSynthesis.cancel();
 
-        addLog('Session ended');
+        // Release media stream
+        if (mediaStreamRef.current) {
+            mediaStreamRef.current.getTracks().forEach(track => track.stop());
+            mediaStreamRef.current = null;
+        }
+
         onEndSession();
     }, [onEndSession]);
 
@@ -489,18 +706,26 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({ onEndSession, onSpeakingSta
                     {/* Status Text */}
                     <p className={styles.statusText}>
                         <span className={styles.statusLabel}>
-                            {isUserSpeaking ? "I'm listening..." :
+                            {isUserSpeaking ? "I'm listening... take your time" :
                                 isThinking ? "Thinking..." :
                                     status === 'speaking' ? "Speaking..." :
-                                        "Listening..."}
+                                        "Listening... take your time"}
                         </span>
                     </p>
 
                     {/* Transcript Feedback */}
                     {!error && (
                         <div className={styles.transcriptContainer}>
-                            {transcript && <p className={styles.transcriptText}>You: "{transcript}"</p>}
-                            {aiResponse && <p className={styles.transcriptText} style={{ color: '#60a5fa', marginTop: '0.5rem' }}>AI: "{aiResponse}"</p>}
+                            {(transcript || interimTranscript) && (
+                                <p className={styles.transcriptText}>
+                                    You: "{transcript}{interimTranscript && <span style={{ opacity: 0.5 }}>{interimTranscript}</span>}"
+                                </p>
+                            )}
+                            {aiResponse && (
+                                <p className={styles.transcriptText} style={{ color: '#60a5fa', marginTop: '0.5rem' }}>
+                                    AI: "{aiResponse}"
+                                </p>
+                            )}
                         </div>
                     )}
 
