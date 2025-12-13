@@ -4,18 +4,18 @@ import { motion } from 'framer-motion';
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useMicVAD } from '@ricky0123/vad-react';
 import styles from './Patient.module.css';
-import { Mic, AlertCircle } from 'lucide-react';
+import { Mic, AlertCircle, PhoneOff } from 'lucide-react';
 
 // ============================================
-// EVERLOVED VOICE SESSION v5.0
-// HANDS-FREE + INTERRUPTIBLE (VAD-POWERED)
+// EVERLOVED VOICE SESSION v6.0
+// FOREVER LOOP + SMART VAD PAUSING
 // ============================================
 // 
 // Features:
-// - Always-on listening via Voice Activity Detection
-// - Automatic speech start/end detection
-// - Barge-in: User can interrupt AI anytime
-// - No button clicks required
+// - Conversation stays live until user clicks "End"
+// - VAD pauses during AI speech (no self-hearing)
+// - VAD resumes immediately after AI finishes
+// - Barge-in still works
 // ============================================
 
 interface VoiceSessionProps {
@@ -63,22 +63,24 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({
     onSpeakingStateChange, 
     activeProfile 
 }) => {
-    // ===== STATE =====
+    // ===== SESSION STATE =====
+    const [isSessionActive, setIsSessionActive] = useState(false);
     const [status, setStatus] = useState<'idle' | 'listening' | 'user-speaking' | 'processing' | 'ai-speaking'>('idle');
     const [transcript, setTranscript] = useState('');
     const [aiResponse, setAiResponse] = useState('');
     const [debugLogs, setDebugLogs] = useState<string[]>([]);
     const [error, setError] = useState<string | null>(null);
-    const [isSessionActive, setIsSessionActive] = useState(false);
 
     // ===== REFS =====
-    const isActiveRef = useRef(false);
+    const isSessionActiveRef = useRef(false);
     const statusRef = useRef(status);
     const recognitionRef = useRef<SpeechRecognitionInstance | null>(null);
     const audioRef = useRef<HTMLAudioElement | null>(null);
     const transcriptRef = useRef('');
 
+    // Keep refs in sync
     useEffect(() => { statusRef.current = status; }, [status]);
+    useEffect(() => { isSessionActiveRef.current = isSessionActive; }, [isSessionActive]);
 
     const addLog = (msg: string) => {
         const ts = new Date().toLocaleTimeString();
@@ -86,7 +88,7 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({
         setDebugLogs(prev => [...prev.slice(-4), `${ts}: ${msg}`]);
     };
 
-    // ===== BARGE-IN: STOP AI AUDIO =====
+    // ===== STOP AI AUDIO (BARGE-IN) =====
     const stopAIAudio = useCallback(() => {
         if (audioRef.current) {
             audioRef.current.pause();
@@ -97,9 +99,68 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({
         if (onSpeakingStateChange) onSpeakingStateChange(false);
     }, [onSpeakingStateChange]);
 
-    // ===== PLAY AI RESPONSE =====
+    // ===== VAD HOOK (configured for forever loop) =====
+    const vad = useMicVAD({
+        startOnLoad: false, // Manual control only
+        redemptionFrames: 15,
+        positiveSpeechThreshold: 0.8,
+        negativeSpeechThreshold: 0.4,
+        minSpeechFrames: 5,
+        onSpeechStart: () => {
+            if (!isSessionActiveRef.current) return;
+            
+            addLog('🎤 User speaking...');
+            
+            // BARGE-IN: Stop AI if speaking
+            if (statusRef.current === 'ai-speaking') {
+                stopAIAudio();
+            }
+            
+            setStatus('user-speaking');
+            transcriptRef.current = '';
+            setTranscript('');
+            
+            // Start speech recognition
+            if (recognitionRef.current) {
+                try {
+                    recognitionRef.current.start();
+                } catch (e) {
+                    // May already be running
+                }
+            }
+        },
+        onSpeechEnd: () => {
+            if (!isSessionActiveRef.current) return;
+            
+            addLog('🔇 User stopped');
+            
+            // Stop speech recognition
+            if (recognitionRef.current) {
+                try {
+                    recognitionRef.current.stop();
+                } catch (e) {}
+            }
+            
+            // Process the accumulated transcript
+            const finalText = transcriptRef.current.trim();
+            if (finalText.length > 2) {
+                processUserSpeech(finalText);
+            } else {
+                setStatus('listening');
+            }
+        },
+        onVADMisfire: () => {
+            // Noise detected, not speech - just ignore
+        },
+    });
+
+    // ===== PLAY AI RESPONSE (with VAD pause/resume) =====
     const playAIResponse = useCallback(async (text: string) => {
-        if (!isActiveRef.current) return;
+        if (!isSessionActiveRef.current) return;
+
+        // PAUSE VAD while AI speaks (prevent self-hearing)
+        vad.pause();
+        addLog('🔇 VAD paused');
 
         setStatus('ai-speaking');
         if (onSpeakingStateChange) onSpeakingStateChange(true);
@@ -125,10 +186,14 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({
                 addLog('✓ AI done');
                 if (onSpeakingStateChange) onSpeakingStateChange(false);
                 
-                if (isActiveRef.current) {
+                if (isSessionActiveRef.current) {
                     setStatus('listening');
                     setTranscript('');
                     transcriptRef.current = '';
+                    
+                    // RESUME VAD after AI finishes
+                    vad.start();
+                    addLog('👂 VAD resumed');
                 }
             };
 
@@ -136,7 +201,12 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({
                 URL.revokeObjectURL(audioUrl);
                 audioRef.current = null;
                 if (onSpeakingStateChange) onSpeakingStateChange(false);
-                if (isActiveRef.current) setStatus('listening');
+                
+                if (isSessionActiveRef.current) {
+                    setStatus('listening');
+                    vad.start(); // Resume VAD even on error
+                    addLog('👂 VAD resumed (after error)');
+                }
             };
 
             await audio.play();
@@ -145,14 +215,21 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({
             console.error('TTS error:', err);
             addLog('TTS error');
             if (onSpeakingStateChange) onSpeakingStateChange(false);
-            if (isActiveRef.current) setStatus('listening');
+            
+            if (isSessionActiveRef.current) {
+                setStatus('listening');
+                vad.start(); // Resume VAD even on error
+            }
         }
-    }, [activeProfile, onSpeakingStateChange]);
+    }, [activeProfile, onSpeakingStateChange, vad]);
 
     // ===== PROCESS SPEECH =====
     const processUserSpeech = useCallback(async (text: string) => {
-        if (!text.trim() || text.length < 2 || !isActiveRef.current) return;
+        if (!text.trim() || text.length < 2 || !isSessionActiveRef.current) return;
 
+        // Pause VAD during processing
+        vad.pause();
+        
         setStatus('processing');
         addLog(`🤔 Processing: "${text.substring(0, 30)}..."`);
 
@@ -176,9 +253,13 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({
         } catch (err: any) {
             console.error('Error:', err);
             addLog(`Error: ${err.message}`);
-            if (isActiveRef.current) setStatus('listening');
+            
+            if (isSessionActiveRef.current) {
+                setStatus('listening');
+                vad.start(); // Resume VAD on error
+            }
         }
-    }, [activeProfile, playAIResponse]);
+    }, [activeProfile, playAIResponse, vad]);
 
     // ===== SPEECH RECOGNITION SETUP =====
     useEffect(() => {
@@ -194,7 +275,7 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({
         recognition.lang = 'en-US';
 
         recognition.onresult = (event: SpeechRecognitionEvent) => {
-            if (!isActiveRef.current) return;
+            if (!isSessionActiveRef.current) return;
 
             let finalTranscript = '';
             let interimTranscript = '';
@@ -221,10 +302,6 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({
             }
         };
 
-        recognition.onend = () => {
-            // Will be restarted by VAD
-        };
-
         recognitionRef.current = recognition;
 
         return () => {
@@ -232,62 +309,9 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({
         };
     }, []);
 
-    // ===== VAD HOOK =====
-    const vad = useMicVAD({
-        startOnLoad: false, // We'll start it manually when session begins
-        redemptionFrames: 20, // Wait ~20 frames to confirm speech ended
-        onSpeechStart: () => {
-            if (!isActiveRef.current) return;
-            
-            addLog('🎤 User speaking...');
-            
-            // BARGE-IN: Stop AI if speaking
-            if (statusRef.current === 'ai-speaking') {
-                stopAIAudio();
-            }
-            
-            setStatus('user-speaking');
-            transcriptRef.current = '';
-            setTranscript('');
-            
-            // Start speech recognition
-            if (recognitionRef.current) {
-                try {
-                    recognitionRef.current.start();
-                } catch (e) {
-                    // May already be running
-                }
-            }
-        },
-        onSpeechEnd: () => {
-            if (!isActiveRef.current) return;
-            
-            addLog('🔇 User stopped');
-            
-            // Stop speech recognition
-            if (recognitionRef.current) {
-                try {
-                    recognitionRef.current.stop();
-                } catch (e) {}
-            }
-            
-            // Process the accumulated transcript
-            const finalText = transcriptRef.current.trim();
-            if (finalText.length > 2) {
-                processUserSpeech(finalText);
-            } else {
-                setStatus('listening');
-            }
-        },
-        onVADMisfire: () => {
-            addLog('VAD misfire (noise)');
-        },
-    });
-
     // ===== START SESSION =====
     const handleStartSession = useCallback(async () => {
         try {
-            // Request microphone permission
             await navigator.mediaDevices.getUserMedia({
                 audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
             });
@@ -296,7 +320,6 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({
             return;
         }
 
-        isActiveRef.current = true;
         setIsSessionActive(true);
         setStatus('listening');
         setError(null);
@@ -304,36 +327,38 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({
         setAiResponse('');
         transcriptRef.current = '';
 
-        // Start VAD
+        // Start VAD - it will run forever until we stop it
         vad.start();
         
-        addLog('🚀 Hands-free mode active');
+        addLog('🚀 Conversation started (hands-free)');
     }, [vad]);
 
     // ===== END SESSION =====
     const handleEndSession = useCallback(() => {
-        addLog('🛑 Session ended');
+        addLog('🛑 Conversation ended');
         
-        isActiveRef.current = false;
         setIsSessionActive(false);
         setStatus('idle');
 
-        // Stop everything
+        // Stop VAD completely
         vad.pause();
         
+        // Stop speech recognition
         if (recognitionRef.current) {
             try { recognitionRef.current.abort(); } catch (e) {}
         }
         
+        // Stop any playing audio
         if (audioRef.current) {
             audioRef.current.pause();
             audioRef.current = null;
         }
 
+        if (onSpeakingStateChange) onSpeakingStateChange(false);
         onEndSession();
-    }, [vad, onEndSession]);
+    }, [vad, onEndSession, onSpeakingStateChange]);
 
-    // ===== STATUS INDICATOR COLOR =====
+    // ===== STATUS INDICATOR =====
     const getStatusColor = () => {
         switch (status) {
             case 'listening': return '#22c55e'; // Green
@@ -376,13 +401,15 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({
                 </motion.div>
             )}
 
-            {/* START BUTTON (only shown before session starts) */}
+            {/* IDLE STATE: Start Button */}
             {!isSessionActive && (
                 <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', justifyContent: 'center', height: '100%', zIndex: 20 }}>
                     <button onClick={handleStartSession} className={styles.startButton}>
                         <Mic size={32} />
                     </button>
-                    <p style={{ color: '#94a3b8', fontSize: '0.8rem', marginTop: '0.5rem' }}>Tap to start hands-free</p>
+                    <p style={{ color: '#94a3b8', fontSize: '0.8rem', marginTop: '0.5rem', textAlign: 'center' }}>
+                        Tap to start<br/>hands-free conversation
+                    </p>
                 </div>
             )}
 
@@ -448,10 +475,32 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({
                         {debugLogs.map((log, i) => <div key={i}>{log}</div>)}
                     </div>
 
-                    {/* End Button */}
-                    <div style={{ marginTop: 'auto', display: 'flex', gap: '1rem' }}>
-                        <button className={styles.endButton} onClick={handleEndSession}
-                            style={{ borderColor: 'rgba(239, 68, 68, 0.5)', color: '#fca5a5', background: 'rgba(239, 68, 68, 0.1)' }}>
+                    {/* END CONVERSATION BUTTON */}
+                    <div style={{ marginTop: 'auto', paddingTop: '1rem' }}>
+                        <button 
+                            onClick={handleEndSession}
+                            style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '0.5rem',
+                                padding: '0.75rem 1.5rem',
+                                backgroundColor: 'rgba(239, 68, 68, 0.15)',
+                                border: '1px solid rgba(239, 68, 68, 0.4)',
+                                borderRadius: '12px',
+                                color: '#fca5a5',
+                                fontSize: '1rem',
+                                fontWeight: '500',
+                                cursor: 'pointer',
+                                transition: 'all 0.2s ease',
+                            }}
+                            onMouseEnter={(e) => {
+                                e.currentTarget.style.backgroundColor = 'rgba(239, 68, 68, 0.25)';
+                            }}
+                            onMouseLeave={(e) => {
+                                e.currentTarget.style.backgroundColor = 'rgba(239, 68, 68, 0.15)';
+                            }}
+                        >
+                            <PhoneOff size={20} />
                             End Conversation
                         </button>
                     </div>
