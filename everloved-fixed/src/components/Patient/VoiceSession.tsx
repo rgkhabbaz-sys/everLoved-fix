@@ -1,4 +1,4 @@
- 'use client';
+'use client';
 
 import { motion } from 'framer-motion';
 import React, { useState, useEffect, useRef, useCallback } from 'react';
@@ -69,7 +69,7 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({
     activeProfile 
 }) => {
     const CONFIG = {
-        SILENCE_THRESHOLD_MS: 1200,  // Wait 1.2s of silence before processing
+        SILENCE_THRESHOLD_MS: 800,  // Reduced to 800ms for faster response
         MIN_TRANSCRIPT_LENGTH: 2,
     };
 
@@ -88,7 +88,6 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({
     const isActiveRef = useRef(false);
     const statusRef = useRef(status);
     const recognitionRef = useRef<SpeechRecognitionInstance | null>(null);
-    const audioRef = useRef<HTMLAudioElement | null>(null);
     const silenceTimerRef = useRef<NodeJS.Timeout | null>(null);
     const accumulatedTextRef = useRef('');
 
@@ -126,7 +125,7 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({
         }
     }, []);
 
-    // ===== PLAY AI AUDIO =====
+    // ===== PLAY AI AUDIO - BROWSER TTS FOR SPEED =====
     const playAudio = useCallback(async (text: string) => {
         if (!isActiveRef.current) return;
 
@@ -137,66 +136,24 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({
         if (onSpeakingStateChange) onSpeakingStateChange(true);
         addLog('🔊 Speaking...');
 
-        const gender = activeProfile?.gender || 'female';
-
-        try {
-            const response = await fetch('/api/speak', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ message: text, gender }),
-            });
-
-            if (!response.ok) throw new Error('TTS failed');
-
-            const audioBlob = await response.blob();
-            const audioUrl = URL.createObjectURL(audioBlob);
-            const audio = new Audio(audioUrl);
-            audioRef.current = audio;
-
-            // When audio finishes, restart listening
-            audio.onended = () => {
-                URL.revokeObjectURL(audioUrl);
-                audioRef.current = null;
-                addLog('✓ Audio complete');
-                
-                if (onSpeakingStateChange) onSpeakingStateChange(false);
-                
-                if (isActiveRef.current) {
-                    setStatus('listening');
-                    setTranscript('');
-                    setInterimTranscript('');
-                    accumulatedTextRef.current = '';
-                    // Small delay then restart recognition
-                    setTimeout(() => {
-                        if (isActiveRef.current) {
-                            startListening();
-                        }
-                    }, 300);
-                }
-            };
-
-            audio.onerror = () => {
-                URL.revokeObjectURL(audioUrl);
-                audioRef.current = null;
-                addLog('Audio error - using fallback');
-                playFallbackTTS(text);
-            };
-
-            await audio.play();
-
-        } catch (err) {
-            console.error('TTS error:', err);
-            playFallbackTTS(text);
-        }
-    }, [activeProfile, onSpeakingStateChange, stopListening, startListening]);
-
-    // ===== FALLBACK BROWSER TTS =====
-    const playFallbackTTS = useCallback((text: string) => {
+        // Use browser TTS for instant response (no network latency)
         window.speechSynthesis.cancel();
         const utterance = new SpeechSynthesisUtterance(text);
-        utterance.rate = 0.9;
+        
+        // Try to get a good voice
+        const voices = window.speechSynthesis.getVoices();
+        const preferredVoice = voices.find(v => 
+            v.name.includes('Google') || 
+            v.name.includes('Samantha') || 
+            v.name.includes('Microsoft')
+        );
+        if (preferredVoice) utterance.voice = preferredVoice;
+        
+        utterance.rate = 0.95;
+        utterance.pitch = 1;
 
         utterance.onend = () => {
+            addLog('✓ Speech complete');
             if (onSpeakingStateChange) onSpeakingStateChange(false);
             
             if (isActiveRef.current) {
@@ -208,19 +165,20 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({
                     if (isActiveRef.current) {
                         startListening();
                     }
-                }, 300);
+                }, 200);
             }
         };
 
         utterance.onerror = () => {
+            if (onSpeakingStateChange) onSpeakingStateChange(false);
             if (isActiveRef.current) {
                 setStatus('listening');
-                setTimeout(() => startListening(), 300);
+                setTimeout(() => startListening(), 200);
             }
         };
 
         window.speechSynthesis.speak(utterance);
-    }, [onSpeakingStateChange, startListening]);
+    }, [onSpeakingStateChange, stopListening, startListening]);
 
     // ===== PROCESS USER SPEECH =====
     const processUserSpeech = useCallback(async (text: string) => {
@@ -390,12 +348,6 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({
         setStatus('idle');
 
         stopListening();
-        
-        if (audioRef.current) {
-            audioRef.current.pause();
-            audioRef.current = null;
-        }
-        
         window.speechSynthesis.cancel();
         onEndSession();
     }, [onEndSession, stopListening]);
