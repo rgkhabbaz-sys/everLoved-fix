@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef } from 'react';
 import Image from 'next/image';
 import VoiceSession from '../components/Patient/VoiceSession';
+import VideoPlayer from '../components/Patient/VideoPlayer';
 import TherapyModes from '../components/Patient/TherapyModes';
 import styles from './page.module.css';
 
@@ -12,7 +13,7 @@ export default function Home() {
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [mode, setMode] = useState<'clinical' | 'video' | 'music' | 'meditation'>('clinical');
   const [avatar, setAvatar] = useState<string | null>(null);
-  const [activeProfile, setActiveProfile] = useState<any>(null); // Store the full persona profile
+  const [activeProfile, setActiveProfile] = useState<any>(null);
 
   useEffect(() => {
     // Load avatar image
@@ -90,8 +91,8 @@ export default function Home() {
           everLoved
         </motion.div>}
 
-      {/* Floating Avatar Box */}
-      {avatar && (
+      {/* Floating Avatar Box - hide when in video mode */}
+      {avatar && mode !== 'video' && (
         <motion.div
           className={styles.avatarBox}
           initial={{ opacity: 0, scale: 0.9, x: "-50%", y: "-50%" }}
@@ -99,7 +100,7 @@ export default function Home() {
             opacity: 1,
             x: "-50%",
             y: "-50%",
-            scale: [1, 1.05, 1] // Keyframe array for explicit loop control
+            scale: [1, 1.05, 1]
           }}
           transition={{
             opacity: { duration: 2.0, ease: "easeOut" },
@@ -121,11 +122,32 @@ export default function Home() {
       <div className={styles.content}>
         <div className={styles.frame}>
 
-          <VoiceSession
-            activeProfile={activeProfile}
-            onSpeakingStateChange={setIsSpeaking}
-            onEndSession={() => setIsSpeaking(false)}
-          />
+          {/* Show VoiceSession for clinical mode */}
+          {mode === 'clinical' && (
+            <VoiceSession
+              activeProfile={activeProfile}
+              onSpeakingStateChange={setIsSpeaking}
+              onEndSession={() => setIsSpeaking(false)}
+            />
+          )}
+
+          {/* Show VideoPlayer for video mode */}
+          {mode === 'video' && (
+            <VideoPlayer onClose={() => setMode('clinical')} />
+          )}
+
+          {/* Placeholder for other modes */}
+          {mode === 'music' && (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: '#94a3b8' }}>
+              <p>Music therapy coming soon...</p>
+            </div>
+          )}
+
+          {mode === 'meditation' && (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: '#94a3b8' }}>
+              <p>Calm meditation coming soon...</p>
+            </div>
+          )}
 
           <motion.div
             initial={{ opacity: 0, y: 20 }}
