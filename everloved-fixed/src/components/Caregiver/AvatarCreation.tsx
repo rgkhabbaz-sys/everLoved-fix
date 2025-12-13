@@ -1,10 +1,21 @@
 'use client';
 
-import React, { useRef } from 'react';
-import { Upload, Mic, Shield, Check, X, Video } from 'lucide-react';
+import React, { useRef, useState, useEffect } from 'react';
+import { Upload, Mic, Shield, Check, X, Video, Trash2 } from 'lucide-react';
 import styles from './Caregiver.module.css';
 import { motion } from 'framer-motion';
 import { useAvatar } from '../../hooks/useAvatar';
+import { saveVideo, getAllVideos, deleteVideo } from '../../utils/videoStorage';
+
+interface StoredVideo {
+    id: string;
+    name: string;
+    blob: Blob;
+    type: string;
+    size: number;
+    uploadedAt: number;
+    thumbnail?: string;
+}
 
 const AvatarCreation = () => {
     const {
@@ -27,7 +38,26 @@ const AvatarCreation = () => {
     } = useAvatar();
 
     const fileInputRef = useRef<HTMLInputElement>(null);
-    const textFileRef = useRef<HTMLInputElement>(null); // Ref for text file upload
+    const textFileRef = useRef<HTMLInputElement>(null);
+    const videoInputRef = useRef<HTMLInputElement>(null);
+
+    // Video state
+    const [videos, setVideos] = useState<StoredVideo[]>([]);
+    const [isUploadingVideo, setIsUploadingVideo] = useState(false);
+    const [videoUploadMessage, setVideoUploadMessage] = useState<string | null>(null);
+
+    // Load existing videos on mount
+    useEffect(() => {
+        const loadVideos = async () => {
+            try {
+                const storedVideos = await getAllVideos();
+                setVideos(storedVideos);
+            } catch (err) {
+                console.error('Failed to load videos:', err);
+            }
+        };
+        loadVideos();
+    }, []);
 
     const handleTextFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
@@ -41,6 +71,63 @@ const AvatarCreation = () => {
             }
         };
         reader.readAsText(file);
+    };
+
+    const handleVideoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+
+        // Validate file type
+        const validTypes = ['video/mp4', 'video/webm', 'video/mov', 'video/quicktime'];
+        if (!validTypes.includes(file.type)) {
+            setVideoUploadMessage('Please upload MP4, WebM, or MOV files');
+            setTimeout(() => setVideoUploadMessage(null), 3000);
+            return;
+        }
+
+        // Validate file size (100MB limit)
+        const maxSize = 100 * 1024 * 1024;
+        if (file.size > maxSize) {
+            setVideoUploadMessage('Video must be under 100MB');
+            setTimeout(() => setVideoUploadMessage(null), 3000);
+            return;
+        }
+
+        setIsUploadingVideo(true);
+        setVideoUploadMessage('Uploading...');
+
+        try {
+            const savedVideo = await saveVideo(file);
+            setVideos(prev => [...prev, savedVideo]);
+            setVideoUploadMessage('Video uploaded!');
+            setTimeout(() => setVideoUploadMessage(null), 3000);
+        } catch (err) {
+            console.error('Failed to save video:', err);
+            setVideoUploadMessage('Upload failed. Please try again.');
+            setTimeout(() => setVideoUploadMessage(null), 3000);
+        } finally {
+            setIsUploadingVideo(false);
+            // Reset input
+            if (videoInputRef.current) {
+                videoInputRef.current.value = '';
+            }
+        }
+    };
+
+    const handleDeleteVideo = async (videoId: string) => {
+        try {
+            await deleteVideo(videoId);
+            setVideos(prev => prev.filter(v => v.id !== videoId));
+        } catch (err) {
+            console.error('Failed to delete video:', err);
+        }
+    };
+
+    const formatFileSize = (bytes: number): string => {
+        if (bytes < 1024 * 1024) {
+            return `${(bytes / 1024).toFixed(1)} KB`;
+        }
+        return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
     };
 
     return (
@@ -340,29 +427,136 @@ const AvatarCreation = () => {
             >
                 <div className={styles.cardHeader}>
                     <Video className={styles.cardIcon} size={24} />
-                    <h2 className={styles.cardTitle}>Video Generation</h2>
+                    <h2 className={styles.cardTitle}>Video Library</h2>
                 </div>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
-                    {/* Photo to Video */}
-                    <div className={styles.uploadZone} style={{ borderColor: 'rgba(147, 51, 234, 0.3)', background: 'rgba(147, 51, 234, 0.05)', padding: '2rem' }}>
-                        <Upload size={32} style={{ color: '#a855f7' }} />
-                        <p style={{ fontWeight: 600, marginTop: '1rem' }}>Photo to Video</p>
-                        <p style={{ fontSize: '0.8rem', opacity: 0.7, marginBottom: '1rem' }}>GenAI Memories</p>
-                        <button className={styles.tabButton} style={{ background: 'rgba(147, 51, 234, 0.2)', color: '#d8b4fe', width: '100%', fontSize: '0.9rem' }}>
-                            Select Photos
-                        </button>
-                    </div>
+                
+                {/* Upload Zone */}
+                <div 
+                    className={styles.uploadZone} 
+                    style={{ borderColor: 'rgba(59, 130, 246, 0.3)', background: 'rgba(59, 130, 246, 0.05)', padding: '2rem', cursor: 'pointer' }}
+                    onClick={() => videoInputRef.current?.click()}
+                >
+                    <input
+                        type="file"
+                        ref={videoInputRef}
+                        style={{ display: 'none' }}
+                        accept="video/mp4,video/webm,video/mov,video/quicktime"
+                        onChange={handleVideoUpload}
+                    />
+                    <Video size={32} style={{ color: '#3b82f6' }} />
+                    <p style={{ fontWeight: 600, marginTop: '1rem' }}>Upload Comfort Videos</p>
+                    <p style={{ fontSize: '0.8rem', opacity: 0.7, marginBottom: '1rem' }}>MP4, WebM, MOV (max 100MB)</p>
+                    <button 
+                        className={styles.tabButton} 
+                        style={{ background: 'rgba(59, 130, 246, 0.2)', color: '#93c5fd', width: '100%', fontSize: '0.9rem' }}
+                        disabled={isUploadingVideo}
+                    >
+                        {isUploadingVideo ? 'Uploading...' : 'Select Video'}
+                    </button>
+                </div>
 
-                    {/* Upload Video */}
-                    <div className={styles.uploadZone} style={{ borderColor: 'rgba(59, 130, 246, 0.3)', background: 'rgba(59, 130, 246, 0.05)', padding: '2rem' }}>
-                        <Video size={32} style={{ color: '#3b82f6' }} />
-                        <p style={{ fontWeight: 600, marginTop: '1rem' }}>Upload Video</p>
-                        <p style={{ fontSize: '0.8rem', opacity: 0.7, marginBottom: '1rem' }}>Existing Clips</p>
-                        <button className={styles.tabButton} style={{ background: 'rgba(59, 130, 246, 0.2)', color: '#93c5fd', width: '100%', fontSize: '0.9rem' }}>
-                            Select Video
-                        </button>
+                {/* Upload Message */}
+                {videoUploadMessage && (
+                    <p style={{ 
+                        marginTop: '0.75rem', 
+                        fontSize: '0.85rem', 
+                        color: videoUploadMessage.includes('failed') || videoUploadMessage.includes('Please') ? '#f87171' : '#4ade80',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '0.5rem'
+                    }}>
+                        {videoUploadMessage.includes('failed') || videoUploadMessage.includes('Please') ? <X size={14} /> : <Check size={14} />}
+                        {videoUploadMessage}
+                    </p>
+                )}
+
+                {/* Video List */}
+                {videos.length > 0 && (
+                    <div style={{ marginTop: '1.5rem' }}>
+                        <p className={styles.label}>Uploaded Videos ({videos.length})</p>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', marginTop: '0.75rem' }}>
+                            {videos.map((video) => (
+                                <div
+                                    key={video.id}
+                                    style={{
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        gap: '0.75rem',
+                                        padding: '0.75rem',
+                                        background: 'rgba(255,255,255,0.05)',
+                                        borderRadius: '8px',
+                                        border: '1px solid rgba(255,255,255,0.1)',
+                                    }}
+                                >
+                                    {/* Thumbnail */}
+                                    <div
+                                        style={{
+                                            width: '80px',
+                                            height: '45px',
+                                            borderRadius: '6px',
+                                            overflow: 'hidden',
+                                            background: '#1f2937',
+                                            flexShrink: 0,
+                                        }}
+                                    >
+                                        {video.thumbnail ? (
+                                            <img
+                                                src={video.thumbnail}
+                                                alt={video.name}
+                                                style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                                            />
+                                        ) : (
+                                            <div style={{ 
+                                                width: '100%', 
+                                                height: '100%', 
+                                                display: 'flex', 
+                                                alignItems: 'center', 
+                                                justifyContent: 'center' 
+                                            }}>
+                                                <Video size={16} style={{ opacity: 0.5 }} />
+                                            </div>
+                                        )}
+                                    </div>
+
+                                    {/* Info */}
+                                    <div style={{ flex: 1, minWidth: 0 }}>
+                                        <p style={{ 
+                                            fontSize: '0.9rem', 
+                                            fontWeight: 500, 
+                                            marginBottom: '0.25rem',
+                                            overflow: 'hidden',
+                                            textOverflow: 'ellipsis',
+                                            whiteSpace: 'nowrap',
+                                        }}>
+                                            {video.name}
+                                        </p>
+                                        <p style={{ fontSize: '0.75rem', opacity: 0.6 }}>
+                                            {formatFileSize(video.size)}
+                                        </p>
+                                    </div>
+
+                                    {/* Delete Button */}
+                                    <button
+                                        onClick={() => handleDeleteVideo(video.id)}
+                                        style={{
+                                            background: 'rgba(239, 68, 68, 0.1)',
+                                            border: '1px solid rgba(239, 68, 68, 0.3)',
+                                            borderRadius: '6px',
+                                            padding: '0.5rem',
+                                            cursor: 'pointer',
+                                            color: '#f87171',
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            justifyContent: 'center',
+                                        }}
+                                    >
+                                        <Trash2 size={16} />
+                                    </button>
+                                </div>
+                            ))}
+                        </div>
                     </div>
-                </div>
+                )}
             </motion.div>
 
             {/* Save Button */}
