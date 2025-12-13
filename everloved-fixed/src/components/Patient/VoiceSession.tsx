@@ -1,4 +1,4 @@
-'use client';
+ 'use client';
 
 import { motion } from 'framer-motion';
 import React, { useState, useEffect, useRef, useCallback } from 'react';
@@ -33,7 +33,7 @@ interface SpeechRecognitionAlternative {
     confidence: number;
 }
 
-interface SpeechRecognition extends EventTarget {
+interface SpeechRecognitionInstance {
     continuous: boolean;
     interimResults: boolean;
     lang: string;
@@ -46,13 +46,6 @@ interface SpeechRecognition extends EventTarget {
     onresult: (event: SpeechRecognitionEvent) => void;
     onerror: (event: any) => void;
     onend: () => void;
-}
-
-declare global {
-    interface Window {
-        webkitSpeechRecognition: { new(): SpeechRecognition };
-        SpeechRecognition: { new(): SpeechRecognition };
-    }
 }
 
 // ============================================
@@ -94,7 +87,7 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({
     // ===== REFS =====
     const isActiveRef = useRef(false);
     const statusRef = useRef(status);
-    const recognitionRef = useRef<SpeechRecognition | null>(null);
+    const recognitionRef = useRef<SpeechRecognitionInstance | null>(null);
     const audioRef = useRef<HTMLAudioElement | null>(null);
     const silenceTimerRef = useRef<NodeJS.Timeout | null>(null);
     const accumulatedTextRef = useRef('');
@@ -275,13 +268,13 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({
 
     // ===== INITIALIZE SPEECH RECOGNITION =====
     useEffect(() => {
-        const SpeechRecognitionAPI = window.SpeechRecognition || window.webkitSpeechRecognition;
+        const SpeechRecognitionAPI = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
         if (!SpeechRecognitionAPI) {
             setError('Speech recognition not supported. Use Chrome, Edge, or Safari.');
             return;
         }
 
-        const recognition = new SpeechRecognitionAPI();
+        const recognition = new SpeechRecognitionAPI() as SpeechRecognitionInstance;
         recognition.continuous = true;
         recognition.interimResults = true;
         recognition.lang = 'en-US';
@@ -502,4 +495,3 @@ const VoiceSession: React.FC<VoiceSessionProps> = ({
 };
 
 export default VoiceSession;
-
